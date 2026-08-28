@@ -138,3 +138,41 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
 @media (max-width: 1200px) { .dashboard { grid-template-columns: repeat(4, 1fr); } }
 @media (max-width: 900px) { .header-content { flex-direction: column; gap: 12px; text-align: center; } .header-left { flex-direction: column; } .dashboard { grid-template-columns: repeat(2, 1fr); } .sources-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 650px) { .header-content, .main-content, .step-navigation { padding-left: 14px; padding-right: 14px; } .card { padding: 18px; } .form-grid, .inline-grid { grid-template-columns: 1fr; } .dashboard { grid-template-columns: repeat(2, 1fr); padding: 0 14px; } .sources-grid { grid-template-columns: 1fr; } .objective-row { flex-wrap: wrap; } .objective-row input { width: 100%; flex-basis: 100%; } .step-actions { flex-direction: column; gap: 8px; } .step-actions .btn { width: 100%; justify-content: center; } .memo-actions { flex-direction: column; } .file-item { flex-direction: column; align-items: flex-start; } .finding-header { flex-direction: column; align-items: flex-start; } }
+
+
+/* Fuentes dinámicas */
+.source-row {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--blue);
+    border-radius: 7px;
+    padding: 16px;
+    margin-bottom: 12px;
+    background: #fff;
+}
+
+.source-row-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    color: var(--blue-dark);
+}
+
+.source-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.fact-card .fact-value {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+@media (max-width: 750px) {
+    .source-grid {
+        grid-template-columns: 1fr;
+    }
+}
