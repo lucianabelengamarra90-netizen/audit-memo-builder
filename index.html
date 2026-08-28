@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audit Memo Builder | Auditoria Interna</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-content">
+            <div class="header-left">
+                <div class="logo-icon">📋</div>
+                <div><h1>Audit Memo Builder</h1><p class="header-subtitle">Herramienta para Auditoria Interna</p></div>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-header" onclick="saveProgress()">💾 Guardar</button>
+                <button class="btn btn-header" onclick="location.reload()">🔄 Nuevo</button>
+            </div>
+        </div>
+    </header>
+
+    <section id="auditDashboard" class="dashboard">
+        <div class="metric"><div class="metric-value" id="metricFiles">0</div><div class="metric-label">Archivos</div></div>
+        <div class="metric"><div class="metric-value" id="metricFacts">0</div><div class="metric-label">Hechos</div></div>
+        <div class="metric accepted"><div class="metric-value" id="metricAccepted">0</div><div class="metric-label">Aceptados</div></div>
+        <div class="metric"><div class="metric-value" id="metricTasks">0</div><div class="metric-label">Tareas</div></div>
+        <div class="metric"><div class="metric-value" id="metricFindings">0</div><div class="metric-label">Hallazgos</div></div>
+        <div class="metric high"><div class="metric-value" id="metricHigh">0</div><div class="metric-label">Altos</div></div>
+        <div class="metric medium"><div class="metric-value" id="metricMedium">0</div><div class="metric-label">Medios</div></div>
+        <div class="metric low"><div class="metric-value" id="metricLow">0</div><div class="metric-label">Bajos</div></div>
+    </section>
+
+    <nav class="step-navigation">
+        <div class="step-nav-item active" data-step="1" onclick="goToStep(1)"><div class="step-nav-number">1</div><div class="step-nav-label">Informacion</div></div>
+        <div class="step-nav-item" data-step="2" onclick="goToStep(2)"><div class="step-nav-number">2</div><div class="step-nav-label">Datos</div></div>
+        <div class="step-nav-item" data-step="3" onclick="goToStep(3)"><div class="step-nav-number">3</div><div class="step-nav-label">Hechos</div></div>
+        <div class="step-nav-item" data-step="4" onclick="goToStep(4)"><div class="step-nav-number">4</div><div class="step-nav-label">Tareas</div></div>
+        <div class="step-nav-item" data-step="5" onclick="goToStep(5)"><div class="step-nav-number">5</div><div class="step-nav-label">Hallazgos</div></div>
+        <div class="step-nav-item" data-step="6" onclick="goToStep(6)"><div class="step-nav-number">6</div><div class="step-nav-label">Memo</div></div>
+        <div class="step-nav-item" data-step="7" onclick="goToStep(7)"><div class="step-nav-number">7</div><div class="step-nav-label">Revision</div></div>
+        <div class="step-nav-item" data-step="8" onclick="goToStep(8)"><div class="step-nav-number">8</div><div class="step-nav-label">Exportar</div></div>
+    </nav>
+
+    <main class="main-content">
+        <section id="step-1" class="step-section active">
+            <div class="card">
+                <div class="card-header"><h2>📁 Cargar Informacion</h2><p class="section-description">Cargue archivos: Excel, Word, PDF, CSV, TXT</p></div>
+                <div class="upload-area" id="dropZone">
+                    <div class="upload-icon">📂</div><h3>Arrastre archivos aqui o haga click</h3>
+                    <p>Formatos: .xlsx, .xls, .docx, .pdf, .csv, .txt</p>
+                    <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.docx,.pdf,.csv,.txt" style="display: none;">
+                    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">Seleccionar Archivos</button>
+                </div>
+                <div class="file-list"><h4>📄 Archivos cargados</h4><div id="filesContainer"></div></div>
+                <div class="text-input-section"><h4>📝 Texto libre</h4><textarea id="freeText" placeholder="Pegue aqui texto de emails, notas, observaciones..."></textarea></div>
+                <div class="step-actions"><button class="btn btn-secondary" disabled>Anterior</button><button class="btn btn-primary" onclick="goToStep(2)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-2" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>📊 Datos Generales</h2><p class="section-description">Complete la informacion basica</p></div>
+                <div class="form-grid">
+                    <div class="form-group full-width"><label>Nombre / Titulo *</label><input type="text" id="auditTitle" placeholder="Ej: Auditoria de Logistica"></div>
+                    <div class="form-group"><label>Analisis *</label><input type="text" id="analysis" placeholder="Ej: Recepcion"></div>
+                    <div class="form-group"><label>Sector *</label><input type="text" id="sector" placeholder="Ej: Logistica"></div>
+                    <div class="form-group"><label>Proceso</label><input type="text" id="process" placeholder="Ej: Gestion de Inventarios"></div>
+                    <div class="form-group"><label>Periodo *</label><input type="text" id="period" placeholder="Ej: Ene - Jun 2024"></div>
+                    <div class="form-group"><label>Alcance</label><input type="text" id="scope" placeholder="Ej: 100% operaciones > $100K"></div>
+                    <div class="form-group"><label>Fecha</label><input type="date" id="workDate"></div>
+                    <div class="form-group"><label>Auditor</label><input type="text" id="auditor" placeholder="Nombre"></div>
+                </div>
+                <div class="form-group"><label>Contexto</label><textarea id="context" placeholder="Contexto relevante..."></textarea></div>
+                <div class="form-group"><label>Instrucciones de Redaccion</label><textarea id="writingInstructions" placeholder="Instrucciones..."></textarea></div>
+                <div class="objectives-section"><h3>🎯 Objetivos</h3><div id="objectivesContainer"></div><button class="btn btn-secondary btn-sm" onclick="addObjective()">+ Agregar</button></div>
+                <div class="sources-section"><h3>📚 Fuentes</h3><div class="sources-grid" id="sourcesContainer">
+                    <label class="source-checkbox"><input type="checkbox" value="SAP"> SAP</label>
+                    <label class="source-checkbox"><input type="checkbox" value="Excel"> Excel</label>
+                    <label class="source-checkbox"><input type="checkbox" value="Jira"> Jira</label>
+                    <label class="source-checkbox"><input type="checkbox" value="PowerBI"> Power BI</label>
+                    <label class="source-checkbox"><input type="checkbox" value="Procedimiento"> Procedimiento</label>
+                    <label class="source-checkbox"><input type="checkbox" value="Mail"> Mail</label>
+                </div></div>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(1)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(3)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-3" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>✅ Hechos Identificados</h2><p class="section-description">Valide cada hecho extraido</p></div>
+                <div class="alert-box"><strong>⚠️</strong> La IA no debe inventar datos. Si no surge de la documentacion: "Informacion no identificada."</div>
+                <button class="btn btn-primary btn-lg" onclick="analyzeDocuments()">🔍 Analizar Documentacion</button>
+                <div id="factsContainer" class="facts-container"></div>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(2)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(4)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-4" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>📋 Tareas Realizadas</h2><p class="section-description">Registre procedimientos</p></div>
+                <div id="tasksContainer"></div>
+                <button class="btn btn-secondary btn-sm" onclick="addTask()">+ Agregar Tarea</button>
+                <div class="results-section"><h3>📊 Resultados</h3><div id="resultsContainer"></div><button class="btn btn-secondary btn-sm" onclick="addResult()">+ Agregar Resultado</button></div>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(3)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(5)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-5" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>🚨 Hallazgos</h2><p class="section-description">Defina hallazgos con estructura completa</p></div>
+                <div class="alert-box"><strong>⚠️</strong> Clasifique: Hallazgo, Observacion, Oportunidad, Sin excepcion, Accion implementada</div>
+                <div id="findingsContainer"></div>
+                <button class="btn btn-secondary btn-sm" onclick="addFinding()">+ Agregar Hallazgo</button>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(4)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(6)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-6" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>📄 Generar Memo</h2><p class="section-description">Genere el memo</p></div>
+                <div class="style-selector"><label>Estilo:</label><select id="memoStyle"><option value="ejecutivo">Ejecutivo</option><option value="detallado">Detallado</option><option value="memo_excel">Memo Excel</option></select></div>
+                <button class="btn btn-primary btn-lg" onclick="generateMemo()">📄 Generar Memo</button>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(5)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(7)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-7" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>👁️ Revisar Memo</h2><p class="section-description">Edite segun corresponda</p></div>
+                <div class="memo-actions">
+                    <button class="btn btn-secondary" onclick="improveText()">✨ Mejorar Redaccion</button>
+                    <button class="btn btn-secondary" onclick="generateMemo()">🔄 Regenerar</button>
+                </div>
+                <div id="memoPreview" class="memo-preview"></div>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(6)">← Anterior</button><button class="btn btn-primary" onclick="goToStep(8)">Continuar →</button></div>
+            </div>
+        </section>
+
+        <section id="step-8" class="step-section">
+            <div class="card">
+                <div class="card-header"><h2>📊 Exportar</h2><p class="section-description">Exporte a Excel</p></div>
+                <div class="export-info">
+                    <h4>Hojas incluidas:</h4>
+                    <ul><li><strong>MEMO:</strong> Version final</li><li><strong>Hallazgos:</strong> Listado detallado</li><li><strong>Resultados:</strong> Tablas cuantitativas</li><li><strong>Fuentes:</strong> Fuentes utilizadas</li><li><strong>Trazabilidad:</strong> Hechos validados</li></ul>
+                </div>
+                <button class="btn btn-primary btn-lg" onclick="exportToExcel()">📊 Exportar a Excel</button>
+                <div class="step-actions"><button class="btn btn-secondary" onclick="goToStep(7)">← Anterior</button><button class="btn btn-success" onclick="location.reload()">🔄 Nuevo Memo</button></div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer"><p>Audit Memo Builder v1.0 | Auditoria Interna</p></footer>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
