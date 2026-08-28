@@ -1,593 +1,3636 @@
-from flask import Flask, render_template, request, jsonify, send_file
-from datetime import datetime
-from io import BytesIO
-import re
-
-import pandas as pd
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from docx import Document
-from pypdf import PdfReader
-
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
-
-ALLOWED_EXTENSIONS = {"xlsx", "xls", "csv", "docx", "pdf", "txt"}
-
-MONEY_KEYWORDS = (
-    "importe", "monto", "saldo", "total", "valor", "deuda",
-    "capital", "pago", "cuota", "debe", "haber"
-)
-
-DATE_KEYWORDS = (
-    "fecha", "date", "vto", "venc", "vencimiento", "emision",
-    "emisión", "contabil"
-)
-
-
-def clean_text(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def add_fact(facts, description, value, source, reference, kind="fact"):
-    facts.append({
-        "id": len(facts) + 1,
-        "description": clean_text(description),
-        "value": clean_text(value),
-        "source": clean_text(source),
-        "reference": clean_text(reference),
-        "status": "pending",
-        "kind": kind,
-    })
-
-
-def read_csv_bytes(raw):
-    last_error = None
-    for encoding in ("utf-8-sig", "utf-8", "latin1"):
-        try:
-            return pd.read_csv(BytesIO(raw), low_memory=False, encoding=encoding)
-        except Exception as exc:
-            last_error = exc
-    raise last_error
-
-
-def numeric_series(series):
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce")
-
-    txt = (
-        series.astype(str)
-        .str.strip()
-        .str.replace(r"[^0-9,.\-()]", "", regex=True)
-        .str.replace("(", "-", regex=False)
-        .str.replace(")", "", regex=False)
-    )
-
-    def parse_one(v):
-        if v in ("", "-", ".", ",", "nan", "None"):
-            return None
-        try:
-            if "," in v and "." in v:
-                if v.rfind(",") > v.rfind("."):
-                    v = v.replace(".", "").replace(",", ".")
-                else:
-                    v = v.replace(",", "")
-            elif "," in v:
-                parts = v.split(",")
-                if len(parts[-1]) in (1, 2):
-                    v = v.replace(".", "").replace(",", ".")
-                else:
-                    v = v.replace(",", "")
-            return float(v)
-        except Exception:
-            return None
-
-    return txt.map(parse_one)
-
-
-def dataframe_facts(df, filename, reference, facts):
-    add_fact(
-        facts,
-        "Cantidad de registros identificados",
-        f"{len(df):,}".replace(",", "."),
-        filename,
-        reference,
-        "structure",
-    )
-
-    add_fact(
-        facts,
-        "Columnas identificadas",
-        ", ".join(str(c) for c in df.columns),
-        filename,
-        reference,
-        "structure",
-    )
-
-    duplicates = int(df.duplicated().sum())
-    if duplicates:
-        add_fact(
-            facts,
-            "Filas completamente duplicadas",
-            str(duplicates),
-            filename,
-            reference,
-            "quality",
-        )
-
-    missing = int(df.isna().sum().sum())
-    if missing:
-        add_fact(
-            facts,
-            "Celdas vacías identificadas",
-            str(missing),
-            filename,
-            reference,
-            "quality",
-        )
-
-    amount_added = 0
-
-    for col in df.columns:
-        col_text = str(col).strip()
-        low = col_text.lower()
-
-        if amount_added < 8 and any(k in low for k in MONEY_KEYWORDS):
-            nums = numeric_series(df[col])
-            valid = int(nums.notna().sum())
-
-            if len(df) and valid / max(len(df), 1) >= 0.60 and valid:
-                total = float(nums.fillna(0).sum())
-                add_fact(
-                    facts,
-                    f"Total de la columna '{col_text}'",
-                    f"{total:,.2f}",
-                    filename,
-                    reference,
-                    "numeric",
-                )
-                amount_added += 1
-
-        if any(k in low for k in DATE_KEYWORDS):
-            dates = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
-            valid_dates = int(dates.notna().sum())
-
-            if len(df) and valid_dates / max(len(df), 1) >= 0.60 and valid_dates:
-                add_fact(
-                    facts,
-                    f"Rango de fechas de la columna '{col_text}'",
-                    f"{dates.min().date().isoformat()} a {dates.max().date().isoformat()}",
-                    filename,
-                    reference,
-                    "date",
-                )
-
-
-def spreadsheet_facts(raw, filename, ext, facts):
-    if ext == "csv":
-        df = read_csv_bytes(raw)
-        dataframe_facts(df, filename, filename, facts)
-        return
-
-    engine = "xlrd" if ext == "xls" else "openpyxl"
-    excel = pd.ExcelFile(BytesIO(raw), engine=engine)
-
-    add_fact(
-        facts,
-        "Hojas identificadas en el archivo",
-        ", ".join(excel.sheet_names),
-        filename,
-        filename,
-        "structure",
-    )
-
-    for sheet in excel.sheet_names[:12]:
-        df = pd.read_excel(excel, sheet_name=sheet)
-        dataframe_facts(
-            df,
-            filename,
-            f"{filename} | Hoja: {sheet}",
-            facts,
-        )
-
-
-def text_blocks(text, size=1600, limit=5):
-    text = clean_text(text)
-    if not text:
-        return []
-
-    blocks = []
-    pos = 0
-
-    while pos < len(text) and len(blocks) < limit:
-        end = min(pos + size, len(text))
-
-        if end < len(text):
-            cut = text.rfind(". ", pos, end)
-            if cut > pos + 300:
-                end = cut + 1
-
-        blocks.append(text[pos:end].strip())
-        pos = end
-
-    return [b for b in blocks if b]
-
-
-def docx_facts(raw, filename, facts):
-    doc = Document(BytesIO(raw))
-    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-
-    add_fact(
-        facts,
-        "Párrafos con contenido identificados",
-        str(len(paragraphs)),
-        filename,
-        filename,
-        "structure",
-    )
-
-    if doc.tables:
-        add_fact(
-            facts,
-            "Tablas identificadas",
-            str(len(doc.tables)),
-            filename,
-            filename,
-            "structure",
-        )
-
-    text = "\n".join(paragraphs)
-
-    for i, block in enumerate(text_blocks(text), start=1):
-        add_fact(
-            facts,
-            f"Extracto textual identificado {i}",
-            block,
-            filename,
-            f"{filename} | Texto extraído",
-            "text",
-        )
-
-
-def pdf_facts(raw, filename, facts):
-    reader = PdfReader(BytesIO(raw))
-
-    add_fact(
-        facts,
-        "Cantidad de páginas identificadas",
-        str(len(reader.pages)),
-        filename,
-        filename,
-        "structure",
-    )
-
-    extracted = []
-
-    for page_no, page in enumerate(reader.pages[:20], start=1):
-        try:
-            txt = clean_text(page.extract_text() or "")
-        except Exception:
-            txt = ""
-
-        if txt:
-            extracted.append((page_no, txt))
-
-    if not extracted:
-        add_fact(
-            facts,
-            "Resultado de extracción de texto",
-            "No se pudo extraer texto del PDF. Puede tratarse de un documento escaneado.",
-            filename,
-            filename,
-            "warning",
-        )
-        return
-
-    for page_no, txt in extracted[:5]:
-        add_fact(
-            facts,
-            f"Extracto textual identificado - página {page_no}",
-            txt[:1800],
-            filename,
-            f"{filename} | Página {page_no}",
-            "text",
-        )
-
-
-def txt_facts(raw, filename, facts):
-    text = None
-
-    for encoding in ("utf-8-sig", "utf-8", "latin1"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except Exception:
-            pass
-
-    if text is None:
-        raise ValueError("No se pudo decodificar el archivo de texto.")
-
-    for i, block in enumerate(text_blocks(text), start=1):
-        add_fact(
-            facts,
-            f"Extracto textual identificado {i}",
-            block,
-            filename,
-            filename,
-            "text",
-        )
-
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-@app.route("/analyze", methods=["POST"])
-def analyze_documents():
-    files = request.files.getlist("files")
-    free_text = request.form.get("freeText", "").strip()
-
-    if not files and not free_text:
-        return jsonify(error="Cargue al menos un archivo o texto libre."), 400
-
-    facts = []
-    errors = []
-
-    for uploaded in files:
-        filename = uploaded.filename or "archivo_sin_nombre"
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-        if ext not in ALLOWED_EXTENSIONS:
-            errors.append(f"{filename}: formato no admitido.")
-            continue
-
-        try:
-            raw = uploaded.read()
-
-            if ext in {"xlsx", "xls", "csv"}:
-                spreadsheet_facts(raw, filename, ext, facts)
-            elif ext == "docx":
-                docx_facts(raw, filename, facts)
-            elif ext == "pdf":
-                pdf_facts(raw, filename, facts)
-            elif ext == "txt":
-                txt_facts(raw, filename, facts)
-
-        except Exception as exc:
-            errors.append(f"{filename}: {str(exc)}")
-
-    if free_text:
-        for i, block in enumerate(text_blocks(free_text), start=1):
-            add_fact(
-                facts,
-                f"Texto libre aportado por el auditor {i}",
-                block,
-                "Texto libre",
-                "Ingreso manual",
-                "text",
-            )
-
-    message = (
-        f"Se extrajeron {len(facts)} elementos objetivos de la documentación. "
-        "Revise cada uno antes de aceptarlo."
-        if facts
-        else "No se identificaron hechos verificables en la documentación cargada."
-    )
-
-    return jsonify({
-        "facts": facts,
-        "message": message,
-        "errors": errors,
-    })
-
-
-@app.route("/generate-memo", methods=["POST"])
-def generate_memo():
-    data = request.get_json(silent=True) or {}
-    audit_data = data.get("auditData", {})
-    validated_facts = data.get("validatedFacts", [])
-    tasks = data.get("tasks", [])
-    results = data.get("results", [])
-    findings = data.get("findings", [])
-    style = data.get("style", "ejecutivo")
-
-    if not validated_facts:
-        return jsonify(error="Debe existir al menos un hecho validado por el auditor."), 400
-
-    memo = {
-        "header": {
-            "titulo": audit_data.get("titulo", "Auditoría"),
-            "analisis": audit_data.get("analisis", ""),
-            "sector": audit_data.get("sector", ""),
-            "proceso": audit_data.get("proceso", ""),
-            "periodo": audit_data.get("periodo", ""),
-            "alcance": audit_data.get("alcance", ""),
-            "auditor": audit_data.get("auditor", ""),
-            "fecha": audit_data.get("fecha", datetime.now().strftime("%d/%m/%Y")),
-        },
-        "objetivos": audit_data.get("objetivos", []),
-        "fuentes": audit_data.get("fuentes", []),
-        "hechos_validados": validated_facts,
-        "tareas": tasks,
-        "resultados": results,
-        "hallazgos": findings,
-        "estilo": style,
-        "conclusiones": (
-            f"Se registraron {len(findings)} hallazgo(s) en el trabajo. "
-            "La conclusión final debe ser revisada y completada por el auditor "
-            "sobre la base de los hechos aceptados y la evidencia disponible."
-        ),
+const state = {
+    files: [],
+    facts: [],
+    tasks: [],
+    results: [],
+    findings: [],
+    sources: [],
+    memo: null
+};
+
+
+const $ = id =>
+    document.getElementById(id);
+
+
+// =========================================================
+// AUXILIARES
+// =========================================================
+
+function escapeHtml(value) {
+
+    return String(
+        value ?? ""
+    ).replace(
+        /[&<>'"]/g,
+        char => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            "'": "&#39;",
+            '"': "&quot;"
+        }[char])
+    );
+}
+
+
+function escapeAttribute(value) {
+
+    return escapeHtml(
+        value
+    );
+}
+
+
+function nl2br(value) {
+
+    return escapeHtml(
+        value
+    ).replace(
+        /\n/g,
+        "<br>"
+    );
+}
+
+
+function notify(
+    message,
+    type = "success"
+) {
+
+    const element =
+        document.createElement(
+            "div"
+        );
+
+
+    element.className =
+        `toast ${type}`;
+
+
+    element.textContent =
+        message;
+
+
+    document.body.appendChild(
+        element
+    );
+
+
+    setTimeout(
+        () => element.remove(),
+        4200
+    );
+}
+
+
+function fileSize(size) {
+
+    if (
+        size < 1024
+    ) {
+
+        return `${size} B`;
     }
 
-    return jsonify({
-        "memo": memo,
-        "message": "Borrador de memo generado con la información validada.",
-    })
+
+    if (
+        size < 1024 * 1024
+    ) {
+
+        return (
+            size / 1024
+        ).toFixed(1) + " KB";
+    }
 
 
-def autosize_sheet(ws, max_width=55):
-    for column_cells in ws.columns:
-        length = 0
-        letter = column_cells[0].column_letter
-
-        for cell in column_cells:
-            value = "" if cell.value is None else str(cell.value)
-            length = max(length, min(len(value), max_width))
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-        ws.column_dimensions[letter].width = max(12, min(length + 2, max_width))
+    return (
+        size /
+        (
+            1024 *
+            1024
+        )
+    ).toFixed(1) + " MB";
+}
 
 
-@app.route("/export-excel", methods=["POST"])
-def export_excel():
-    data = request.get_json(silent=True) or {}
-    memo_data = data.get("memo", {})
-    output = BytesIO()
+// =========================================================
+// DASHBOARD
+// =========================================================
 
-    blue_dark = "17365D"
-    blue_light = "EAF2F8"
-    white = "FFFFFF"
-    thin = Side(style="thin", color="D9E1E8")
+function updateDashboard() {
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        header = memo_data.get("header", {})
+    const accepted =
+        state.facts.filter(
+            fact =>
+                fact.status ===
+                "accepted"
+        ).length;
 
-        memo_rows = [
-            ["TÍTULO", header.get("titulo", "")],
-            ["ANÁLISIS", header.get("analisis", "")],
-            ["SECTOR", header.get("sector", "")],
-            ["PROCESO", header.get("proceso", "")],
-            ["PERÍODO", header.get("periodo", "")],
-            ["ALCANCE", header.get("alcance", "")],
-            ["AUDITOR", header.get("auditor", "")],
-            ["FECHA", header.get("fecha", "")],
-            ["OBJETIVOS", "\n".join(f"{i+1}. {x}" for i, x in enumerate(memo_data.get("objetivos", [])))],
-            ["CONCLUSIONES", memo_data.get("conclusiones", "")],
-        ]
 
-        pd.DataFrame(memo_rows, columns=["Campo", "Valor"]).to_excel(
-            writer, sheet_name="MEMO", index=False
+    const criticality = {
+        high: 0,
+        medium: 0,
+        low: 0
+    };
+
+
+    state.findings.forEach(
+        finding => {
+
+            if (
+                finding.criticidad
+            ) {
+
+                criticality[
+                    finding.criticidad
+                ] =
+                    (
+                        criticality[
+                            finding.criticidad
+                        ]
+
+                        || 0
+                    )
+
+                    + 1;
+            }
+        }
+    );
+
+
+    const values = {
+
+        metricFiles:
+            state.files.length,
+
+        metricFacts:
+            state.facts.length,
+
+        metricAccepted:
+            accepted,
+
+        metricTasks:
+            state.tasks.length,
+
+        metricFindings:
+            state.findings.length,
+
+        metricHigh:
+            criticality.high,
+
+        metricMedium:
+            criticality.medium,
+
+        metricLow:
+            criticality.low
+    };
+
+
+    Object.entries(
+        values
+    ).forEach(
+        ([id, value]) => {
+
+            if ($(id)) {
+
+                $(id).textContent =
+                    value;
+            }
+        }
+    );
+}
+
+
+// =========================================================
+// NAVEGACIÓN
+// =========================================================
+
+function goToStep(step) {
+
+    if (
+        step === 6 &&
+        !validateBeforeMemo()
+    ) {
+
+        return;
+    }
+
+
+    document
+        .querySelectorAll(
+            ".step-section"
+        )
+        .forEach(
+            section => {
+
+                section.classList.remove(
+                    "active"
+                );
+            }
+        );
+
+
+    document
+        .querySelectorAll(
+            ".step-nav-item"
+        )
+        .forEach(
+            item => {
+
+                item.classList.toggle(
+
+                    "active",
+
+                    Number(
+                        item.dataset.step
+                    ) === step
+                );
+            }
+        );
+
+
+    const target =
+        $(`step-${step}`);
+
+
+    if (
+        target
+    ) {
+
+        target.classList.add(
+            "active"
+        );
+    }
+
+
+    window.scrollTo({
+        top: 0,
+        behavior: "smooth"
+    });
+}
+
+
+// =========================================================
+// ARCHIVOS
+// =========================================================
+
+function initializeUpload() {
+
+    const dropZone =
+        $("dropZone");
+
+
+    const input =
+        $("fileInput");
+
+
+    dropZone.addEventListener(
+        "click",
+        event => {
+
+            if (
+                !event.target.closest(
+                    "button"
+                )
+            ) {
+
+                input.click();
+            }
+        }
+    );
+
+
+    dropZone.addEventListener(
+        "dragover",
+        event => {
+
+            event.preventDefault();
+
+            dropZone.classList.add(
+                "dragging"
+            );
+        }
+    );
+
+
+    dropZone.addEventListener(
+        "dragleave",
+        () => {
+
+            dropZone.classList.remove(
+                "dragging"
+            );
+        }
+    );
+
+
+    dropZone.addEventListener(
+        "drop",
+        event => {
+
+            event.preventDefault();
+
+            dropZone.classList.remove(
+                "dragging"
+            );
+
+
+            addFiles(
+                [
+                    ...event
+                        .dataTransfer
+                        .files
+                ]
+            );
+        }
+    );
+
+
+    input.addEventListener(
+        "change",
+        event => {
+
+            addFiles(
+                [
+                    ...event
+                        .target
+                        .files
+                ]
+            );
+
+
+            input.value =
+                "";
+        }
+    );
+}
+
+
+function addFiles(
+    files
+) {
+
+    const validExtensions = [
+        "xlsx",
+        "xls",
+        "docx",
+        "pdf",
+        "csv",
+        "txt"
+    ];
+
+
+    let rejected = 0;
+
+
+    files.forEach(
+        file => {
+
+            const extension =
+                file.name
+                    .split(".")
+                    .pop()
+                    .toLowerCase();
+
+
+            if (
+                !validExtensions.includes(
+                    extension
+                )
+            ) {
+
+                rejected++;
+
+                return;
+            }
+
+
+            const duplicate =
+                state.files.some(
+                    item =>
+
+                        item.name ===
+                            file.name
+
+                        &&
+
+                        item.size ===
+                            file.size
+                );
+
+
+            if (
+                duplicate
+            ) {
+
+                return;
+            }
+
+
+            state.files.push({
+
+                id:
+                    crypto.randomUUID(),
+
+                file,
+
+                name:
+                    file.name,
+
+                type:
+                    extension,
+
+                size:
+                    file.size
+            });
+
+
+            if (
+                !state.sources.some(
+                    source =>
+                        source.name ===
+                        file.name
+                )
+            ) {
+
+                state.sources.push({
+
+                    id:
+                        crypto.randomUUID(),
+
+                    name:
+                        file.name,
+
+                    type:
+                        sourceTypeFromExtension(
+                            extension
+                        ),
+
+                    reference:
+                        file.name,
+
+                    description:
+                        ""
+                });
+            }
+        }
+    );
+
+
+    renderFiles();
+
+    renderSources();
+
+    updateDashboard();
+
+
+    if (
+        rejected
+    ) {
+
+        notify(
+
+            `${rejected} archivo(s) fueron ignorados por formato no admitido.`,
+
+            "warning"
+        );
+    }
+}
+
+
+function sourceTypeFromExtension(
+    extension
+) {
+
+    if (
+        [
+            "xlsx",
+            "xls",
+            "csv"
+        ].includes(
+            extension
+        )
+    ) {
+
+        return "Excel / Datos";
+    }
+
+
+    if (
+        extension === "pdf"
+    ) {
+
+        return "PDF";
+    }
+
+
+    if (
+        extension === "docx"
+    ) {
+
+        return "Word";
+    }
+
+
+    if (
+        extension === "txt"
+    ) {
+
+        return "Texto";
+    }
+
+
+    return "Otro";
+}
+
+
+function renderFiles() {
+
+    const container =
+        $("filesContainer");
+
+
+    if (
+        !state.files.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">Sin archivos cargados.</p>';
+
+        return;
+    }
+
+
+    container.innerHTML =
+
+        state.files
+            .map(
+                item => `
+
+                    <div class="file-item">
+
+                        <div class="file-meta">
+
+                            <span class="file-type">
+                                ${escapeHtml(item.type)}
+                            </span>
+
+                            <strong>
+                                ${escapeHtml(item.name)}
+                            </strong>
+
+                            <span class="file-size">
+                                ${fileSize(item.size)}
+                            </span>
+
+                        </div>
+
+
+                        <button
+                            class="btn btn-danger btn-sm"
+                            onclick="removeFile('${item.id}')"
+                        >
+                            Eliminar
+                        </button>
+
+                    </div>
+
+                `
+            )
+            .join("");
+}
+
+
+function removeFile(
+    id
+) {
+
+    const selected =
+        state.files.find(
+            file =>
+                file.id === id
+        );
+
+
+    state.files =
+        state.files.filter(
+            file =>
+                file.id !== id
+        );
+
+
+    if (
+        selected
+    ) {
+
+        state.sources =
+            state.sources.filter(
+                source =>
+
+                    !(
+                        source.name ===
+                            selected.name
+
+                        &&
+
+                        source.reference ===
+                            selected.name
+                    )
+            );
+    }
+
+
+    renderFiles();
+
+    renderSources();
+
+    updateDashboard();
+}
+
+
+// =========================================================
+// OBJETIVOS
+// =========================================================
+
+function addObjective(
+    text = ""
+) {
+
+    const id =
+        crypto.randomUUID();
+
+
+    $("objectivesContainer")
+        .insertAdjacentHTML(
+
+            "beforeend",
+
+            `
+
+            <div
+                class="objective-row"
+                data-id="${id}"
+            >
+
+                <input
+                    type="text"
+                    value="${escapeAttribute(text)}"
+                    placeholder="Describa el objetivo de auditoría"
+                >
+
+
+                <button
+                    class="btn btn-secondary reorder-btn"
+                    onclick="moveObjective('${id}', -1)"
+                    title="Subir"
+                >
+                    ↑
+                </button>
+
+
+                <button
+                    class="btn btn-secondary reorder-btn"
+                    onclick="moveObjective('${id}', 1)"
+                    title="Bajar"
+                >
+                    ↓
+                </button>
+
+
+                <button
+                    class="btn btn-danger btn-sm"
+                    onclick="removeObjective('${id}')"
+                >
+                    Eliminar
+                </button>
+
+            </div>
+
+            `
+        );
+}
+
+
+function removeObjective(
+    id
+) {
+
+    document
+        .querySelector(
+            `.objective-row[data-id="${id}"]`
+        )
+        ?.remove();
+}
+
+
+function moveObjective(
+    id,
+    direction
+) {
+
+    const row =
+        document.querySelector(
+            `.objective-row[data-id="${id}"]`
+        );
+
+
+    const container =
+        $("objectivesContainer");
+
+
+    if (
+        !row
+    ) {
+
+        return;
+    }
+
+
+    if (
+        direction < 0 &&
+        row.previousElementSibling
+    ) {
+
+        container.insertBefore(
+
+            row,
+
+            row.previousElementSibling
+        );
+    }
+
+
+    if (
+        direction > 0 &&
+        row.nextElementSibling
+    ) {
+
+        container.insertBefore(
+
+            row.nextElementSibling,
+
+            row
+        );
+    }
+}
+
+
+function getObjectives() {
+
+    return [
+
+        ...document.querySelectorAll(
+            ".objective-row input"
         )
 
-        findings = memo_data.get("hallazgos", [])
-        finding_fields = [
-            "titulo", "descripcion", "condicion", "area_responsable",
-            "responsable_plan", "criticidad", "estado", "fecha_objetivo",
-            "riesgo", "propuesta_mejora", "fundamento_cuantitativo",
-            "fuente", "evidencia", "referencia", "seguimiento"
-        ]
+    ]
+        .map(
+            input =>
+                input.value.trim()
+        )
+        .filter(
+            Boolean
+        );
+}
 
-        if findings:
-            pd.DataFrame([
-                {field: h.get(field, "") for field in finding_fields}
-                for h in findings
-            ]).to_excel(writer, sheet_name="Hallazgos", index=False)
-        else:
-            pd.DataFrame({"Mensaje": ["No hay hallazgos"]}).to_excel(
-                writer, sheet_name="Hallazgos", index=False
+
+// =========================================================
+// FUENTES DINÁMICAS
+// =========================================================
+
+function addSource(
+    data = {}
+) {
+
+    state.sources.push({
+
+        id:
+            data.id ||
+            crypto.randomUUID(),
+
+        name:
+            data.name ||
+            "",
+
+        type:
+            data.type ||
+            "",
+
+        reference:
+            data.reference ||
+            "",
+
+        description:
+            data.description ||
+            ""
+    });
+
+
+    renderSources();
+}
+
+
+function renderSources() {
+
+    const container =
+        $("sourcesContainer");
+
+
+    if (
+        !container
+    ) {
+
+        return;
+    }
+
+
+    if (
+        !state.sources.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">Todavía no agregaste fuentes de información.</p>';
+
+        return;
+    }
+
+
+    const types = [
+        "",
+        "SAP",
+        "Excel / Datos",
+        "PDF",
+        "Word",
+        "Mail",
+        "Entrevista / Reunión",
+        "Power BI",
+        "Jira / Ticket",
+        "Procedimiento",
+        "Contrato",
+        "Confirmación externa",
+        "Texto",
+        "Otro"
+    ];
+
+
+    container.innerHTML =
+
+        state.sources
+            .map(
+                (
+                    source,
+                    index
+                ) => `
+
+                <div
+                    class="source-row"
+                    data-id="${source.id}"
+                >
+
+                    <div class="source-row-header">
+
+                        <strong>
+                            Fuente ${String(index + 1).padStart(2, "0")}
+                        </strong>
+
+
+                        <button
+                            class="btn btn-danger btn-sm"
+                            onclick="deleteSource('${source.id}')"
+                        >
+                            Eliminar
+                        </button>
+
+                    </div>
+
+
+                    <div class="source-grid">
+
+                        <div class="form-group">
+
+                            <label>
+                                Nombre de la fuente *
+                            </label>
+
+                            <input
+                                data-field="name"
+                                value="${escapeAttribute(source.name)}"
+                                placeholder="Ej. FBL1N - Cuenta corriente de proveedores"
+                                oninput="syncSource('${source.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Tipo
+                            </label>
+
+                            <select
+                                data-field="type"
+                                onchange="syncSource('${source.id}', this)"
+                            >
+
+                                ${types
+                                    .map(
+                                        type => `
+
+                                        <option
+                                            value="${escapeAttribute(type)}"
+                                            ${source.type === type ? "selected" : ""}
+                                        >
+                                            ${escapeHtml(type || "Seleccione")}
+                                        </option>
+
+                                        `
+                                    )
+                                    .join("")
+                                }
+
+                            </select>
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Referencia
+                            </label>
+
+                            <input
+                                data-field="reference"
+                                value="${escapeAttribute(source.reference)}"
+                                placeholder="Hoja, transacción, ticket, reporte..."
+                                oninput="syncSource('${source.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Descripción / alcance
+                            </label>
+
+                            <input
+                                data-field="description"
+                                value="${escapeAttribute(source.description)}"
+                                placeholder="Qué información aporta esta fuente"
+                                oninput="syncSource('${source.id}', this)"
+                            >
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                `
+            )
+            .join("");
+}
+
+
+function syncSource(
+    id,
+    element
+) {
+
+    const source =
+        state.sources.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        source
+    ) {
+
+        source[
+            element.dataset.field
+        ] =
+            element.value;
+    }
+}
+
+
+function deleteSource(
+    id
+) {
+
+    state.sources =
+        state.sources.filter(
+            source =>
+                source.id !== id
+        );
+
+
+    renderSources();
+}
+
+
+function getSources() {
+
+    return state.sources
+        .filter(
+            source =>
+                source.name.trim()
+        )
+        .map(
+            source => ({
+
+                name:
+                    source.name.trim(),
+
+                type:
+                    source.type.trim(),
+
+                reference:
+                    source.reference.trim(),
+
+                description:
+                    source.description.trim()
+            })
+        );
+}
+
+
+// =========================================================
+// ANALIZAR DOCUMENTACIÓN
+// =========================================================
+
+async function analyzeDocuments(
+    button = null
+) {
+
+    const freeText =
+        $("freeText")
+            .value
+            .trim();
+
+
+    if (
+        !state.files.length &&
+        !freeText
+    ) {
+
+        notify(
+
+            "Cargue al menos un archivo o texto libre.",
+
+            "warning"
+        );
+
+        return;
+    }
+
+
+    if (
+        button
+    ) {
+
+        button.disabled =
+            true;
+
+        button.textContent =
+            "Analizando archivos...";
+    }
+
+
+    try {
+
+        const formData =
+            new FormData();
+
+
+        state.files.forEach(
+            item => {
+
+                formData.append(
+
+                    "files",
+
+                    item.file,
+
+                    item.name
+                );
+            }
+        );
+
+
+        formData.append(
+
+            "freeText",
+
+            freeText
+        );
+
+
+        const response =
+            await fetch(
+
+                "/analyze",
+
+                {
+                    method:
+                        "POST",
+
+                    body:
+                        formData
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if (
+            !response.ok
+        ) {
+
+            throw new Error(
+
+                data.error ||
+
+                "No se pudo analizar la documentación."
+            );
+        }
+
+
+        state.facts =
+            data.facts ||
+            [];
+
+
+        renderFacts();
+
+        updateDashboard();
+
+
+        if (
+            Array.isArray(
+                data.errors
             )
 
-        results = memo_data.get("resultados", [])
-        if results:
-            pd.DataFrame(results).drop(columns=["id"], errors="ignore").to_excel(
-                writer, sheet_name="Resultados", index=False
+            &&
+
+            data.errors.length
+        ) {
+
+            notify(
+
+                (
+                    data.message ||
+                    "Documentación procesada."
+                )
+
+                +
+
+                " Observaciones: "
+
+                +
+
+                data.errors.join(
+                    " | "
+                ),
+
+                "warning"
+            );
+
+        } else {
+
+            notify(
+
+                data.message ||
+
+                "Documentación analizada."
+            );
+        }
+
+
+    } catch (
+        error
+    ) {
+
+        notify(
+
+            error.message,
+
+            "error"
+        );
+
+
+    } finally {
+
+        if (
+            button
+        ) {
+
+            button.disabled =
+                false;
+
+            button.textContent =
+                "🔍 Analizar documentación";
+        }
+    }
+}
+
+
+// =========================================================
+// HECHOS
+// =========================================================
+
+function renderFacts() {
+
+    const container =
+        $("factsContainer");
+
+
+    if (
+        !state.facts.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">No se identificaron elementos verificables.</p>';
+
+        return;
+    }
+
+
+    container.innerHTML =
+
+        state.facts
+            .map(
+                fact => {
+
+                    const status =
+                        fact.status ||
+                        "pending";
+
+
+                    const statusText =
+
+                        status ===
+                            "accepted"
+
+                            ? "Aceptado"
+
+                            :
+
+                        status ===
+                            "discarded"
+
+                            ? "Descartado"
+
+                            :
+
+                        "Pendiente";
+
+
+                    return `
+
+                    <article
+                        class="fact-card ${status}"
+                    >
+
+                        <div class="fact-title">
+
+                            ${escapeHtml(fact.description)}
+
+                            <span
+                                class="status-badge status-${status}"
+                            >
+                                ${statusText}
+                            </span>
+
+                        </div>
+
+
+                        <div class="fact-value">
+                            ${escapeHtml(fact.value || "Información no identificada.")}
+                        </div>
+
+
+                        <div class="fact-meta">
+
+                            <strong>
+                                Fuente:
+                            </strong>
+
+                            ${escapeHtml(fact.source || "N/A")}
+
+                            |
+
+                            <strong>
+                                Referencia:
+                            </strong>
+
+                            ${escapeHtml(fact.reference || "N/A")}
+
+                        </div>
+
+
+                        <div class="fact-actions">
+
+                            <button
+                                class="btn btn-success btn-sm"
+                                onclick="setFactStatus(${fact.id}, 'accepted')"
+                            >
+                                Aceptar
+                            </button>
+
+
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                onclick="editFact(${fact.id})"
+                            >
+                                Editar
+                            </button>
+
+
+                            <button
+                                class="btn btn-danger btn-sm"
+                                onclick="setFactStatus(${fact.id}, 'discarded')"
+                            >
+                                Descartar
+                            </button>
+
+                        </div>
+
+                    </article>
+
+                    `;
+                }
             )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay resultados"]}).to_excel(
-                writer, sheet_name="Resultados", index=False
+            .join("");
+}
+
+
+function setFactStatus(
+    id,
+    status
+) {
+
+    const fact =
+        state.facts.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        fact
+    ) {
+
+        fact.status =
+            status;
+
+
+        renderFacts();
+
+        updateDashboard();
+    }
+}
+
+
+function editFact(
+    id
+) {
+
+    const fact =
+        state.facts.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        !fact
+    ) {
+
+        return;
+    }
+
+
+    const description =
+        prompt(
+            "Descripción:",
+            fact.description
+        );
+
+
+    if (
+        description === null
+    ) {
+
+        return;
+    }
+
+
+    const value =
+        prompt(
+            "Valor:",
+            fact.value || ""
+        );
+
+
+    if (
+        value === null
+    ) {
+
+        return;
+    }
+
+
+    const source =
+        prompt(
+            "Fuente:",
+            fact.source || ""
+        );
+
+
+    if (
+        source === null
+    ) {
+
+        return;
+    }
+
+
+    const reference =
+        prompt(
+            "Referencia:",
+            fact.reference || ""
+        );
+
+
+    if (
+        reference === null
+    ) {
+
+        return;
+    }
+
+
+    Object.assign(
+        fact,
+        {
+            description,
+            value,
+            source,
+            reference,
+            status:
+                "accepted"
+        }
+    );
+
+
+    renderFacts();
+
+    updateDashboard();
+}
+
+
+// =========================================================
+// TAREAS
+// =========================================================
+
+function addTask(
+    data = {}
+) {
+
+    state.tasks.push({
+
+        id:
+            crypto.randomUUID(),
+
+        ...data
+    });
+
+
+    renderTasks();
+
+    updateDashboard();
+}
+
+
+function renderTasks() {
+
+    const container =
+        $("tasksContainer");
+
+
+    if (
+        !state.tasks.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">Todavía no agregaste tareas.</p>';
+
+        return;
+    }
+
+
+    container.innerHTML =
+
+        state.tasks
+            .map(
+                (
+                    task,
+                    index
+                ) => `
+
+                <div
+                    class="task-card"
+                    data-id="${task.id}"
+                >
+
+                    <div class="task-card-header">
+
+                        <h4>
+                            Tarea ${String(index + 1).padStart(2, "0")}
+                        </h4>
+
+
+                        <button
+                            class="btn btn-danger btn-sm"
+                            onclick="deleteTask('${task.id}')"
+                        >
+                            Eliminar
+                        </button>
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Descripción de la tarea
+                        </label>
+
+                        <textarea
+                            data-field="descripcion"
+                            placeholder="Ej. Se solicitó al área el detalle de préstamos otorgados durante el ejercicio..."
+                            oninput="syncTask('${task.id}', this)"
+                        >${escapeHtml(task.descripcion || "")}</textarea>
+
+                    </div>
+
+
+                    <div class="inline-grid">
+
+                        <div class="form-group">
+
+                            <label>
+                                Fuente
+                            </label>
+
+                            <input
+                                data-field="fuente"
+                                value="${escapeAttribute(task.fuente || "")}"
+                                oninput="syncTask('${task.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Evidencia
+                            </label>
+
+                            <input
+                                data-field="evidencia"
+                                value="${escapeAttribute(task.evidencia || "")}"
+                                oninput="syncTask('${task.id}', this)"
+                            >
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="inline-grid">
+
+                        <div class="form-group">
+
+                            <label>
+                                Resultado de la prueba
+                            </label>
+
+                            <textarea
+                                data-field="resultado"
+                                oninput="syncTask('${task.id}', this)"
+                            >${escapeHtml(task.resultado || "")}</textarea>
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Referencia
+                            </label>
+
+                            <input
+                                data-field="referencia"
+                                value="${escapeAttribute(task.referencia || "")}"
+                                oninput="syncTask('${task.id}', this)"
+                            >
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                `
             )
+            .join("");
+}
 
-        sources = memo_data.get("fuentes", [])
-        if sources:
-            source_rows = []
-            for src in sources:
-                if isinstance(src, dict):
-                    source_rows.append({
-                        "Nombre": src.get("name", ""),
-                        "Tipo": src.get("type", ""),
-                        "Referencia": src.get("reference", ""),
-                        "Descripción": src.get("description", ""),
-                    })
-                else:
-                    source_rows.append({
-                        "Nombre": str(src),
-                        "Tipo": "",
-                        "Referencia": "",
-                        "Descripción": "",
-                    })
 
-            pd.DataFrame(source_rows).to_excel(
-                writer, sheet_name="Fuentes", index=False
+function syncTask(
+    id,
+    element
+) {
+
+    const task =
+        state.tasks.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        task
+    ) {
+
+        task[
+            element.dataset.field
+        ] =
+            element.value;
+    }
+}
+
+
+function deleteTask(
+    id
+) {
+
+    state.tasks =
+        state.tasks.filter(
+            task =>
+                task.id !== id
+        );
+
+
+    renderTasks();
+
+    updateDashboard();
+}
+
+
+// =========================================================
+// RESULTADOS
+// =========================================================
+
+function addResult(
+    data = {}
+) {
+
+    state.results.push({
+
+        id:
+            crypto.randomUUID(),
+
+        clasificacion:
+            "Observación",
+
+        ...data
+    });
+
+
+    renderResults();
+}
+
+
+function renderResults() {
+
+    const container =
+        $("resultsContainer");
+
+
+    if (
+        !state.results.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">Todavía no agregaste resultados.</p>';
+
+        return;
+    }
+
+
+    container.innerHTML =
+
+        state.results
+            .map(
+                (
+                    result,
+                    index
+                ) => `
+
+                <div
+                    class="result-card"
+                    data-id="${result.id}"
+                >
+
+                    <div class="result-card-header">
+
+                        <h4>
+                            Resultado ${String(index + 1).padStart(2, "0")}
+                        </h4>
+
+
+                        <button
+                            class="btn btn-danger btn-sm"
+                            onclick="deleteResult('${result.id}')"
+                        >
+                            Eliminar
+                        </button>
+
+                    </div>
+
+
+                    <div class="inline-grid">
+
+                        <div class="form-group">
+
+                            <label>
+                                Concepto
+                            </label>
+
+                            <input
+                                data-field="concepto"
+                                value="${escapeAttribute(result.concepto || "")}"
+                                oninput="syncResult('${result.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Clasificación
+                            </label>
+
+                            <select
+                                data-field="clasificacion"
+                                onchange="syncResult('${result.id}', this)"
+                            >
+
+                                ${[
+                                    "Hallazgo",
+                                    "Observación",
+                                    "Oportunidad de mejora",
+                                    "Sin excepción",
+                                    "Acción ya implementada"
+                                ]
+                                    .map(
+                                        value => `
+
+                                        <option
+                                            value="${value}"
+                                            ${result.clasificacion === value ? "selected" : ""}
+                                        >
+                                            ${value}
+                                        </option>
+
+                                        `
+                                    )
+                                    .join("")
+                                }
+
+                            </select>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="inline-grid">
+
+                        <div class="form-group">
+
+                            <label>
+                                Cantidad
+                            </label>
+
+                            <input
+                                data-field="cantidad"
+                                value="${escapeAttribute(result.cantidad || "")}"
+                                oninput="syncResult('${result.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Importe
+                            </label>
+
+                            <input
+                                data-field="importe"
+                                value="${escapeAttribute(result.importe || "")}"
+                                oninput="syncResult('${result.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Porcentaje
+                            </label>
+
+                            <input
+                                data-field="porcentaje"
+                                value="${escapeAttribute(result.porcentaje || "")}"
+                                oninput="syncResult('${result.id}', this)"
+                            >
+
+                        </div>
+
+
+                        <div class="form-group">
+
+                            <label>
+                                Observación
+                            </label>
+
+                            <input
+                                data-field="observacion"
+                                value="${escapeAttribute(result.observacion || "")}"
+                                oninput="syncResult('${result.id}', this)"
+                            >
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                `
             )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay fuentes"]}).to_excel(
-                writer, sheet_name="Fuentes", index=False
+            .join("");
+}
+
+
+function syncResult(
+    id,
+    element
+) {
+
+    const result =
+        state.results.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        result
+    ) {
+
+        result[
+            element.dataset.field
+        ] =
+            element.value;
+    }
+}
+
+
+function deleteResult(
+    id
+) {
+
+    state.results =
+        state.results.filter(
+            result =>
+                result.id !== id
+        );
+
+
+    renderResults();
+}
+
+
+// =========================================================
+// HALLAZGOS
+// =========================================================
+
+function addFinding(
+    data = {}
+) {
+
+    state.findings.push({
+
+        id:
+            crypto.randomUUID(),
+
+        criticidad:
+            "medium",
+
+        estado:
+            "Pendiente",
+
+        ...data
+    });
+
+
+    renderFindings();
+
+    updateDashboard();
+}
+
+
+function renderFindings() {
+
+    const container =
+        $("findingsContainer");
+
+
+    if (
+        !state.findings.length
+    ) {
+
+        container.innerHTML =
+            '<p class="section-description">Todavía no agregaste hallazgos.</p>';
+
+        return;
+    }
+
+
+    container.innerHTML =
+
+        state.findings
+            .map(
+                (
+                    finding,
+                    index
+                ) => {
+
+                    const criticality =
+                        finding.criticidad ||
+                        "medium";
+
+
+                    return `
+
+                    <article
+                        class="finding-card ${criticality}"
+                        data-id="${finding.id}"
+                    >
+
+                        <div class="finding-header">
+
+                            <div>
+
+                                <span class="finding-number">
+                                    Hallazgo ${String(index + 1).padStart(2, "0")}
+                                </span>
+
+                                <h4>
+                                    ${escapeHtml(finding.titulo || "Nuevo hallazgo")}
+                                </h4>
+
+                            </div>
+
+
+                            <div>
+
+                                <span
+                                    class="criticality-badge criticality-${criticality}"
+                                >
+                                    ${
+                                        criticality === "high"
+
+                                            ? "🔴 Alto"
+
+                                            :
+
+                                        criticality === "medium"
+
+                                            ? "🟡 Medio"
+
+                                            :
+
+                                        "🟢 Bajo"
+                                    }
+                                </span>
+
+
+                                <button
+                                    class="btn btn-danger btn-sm"
+                                    onclick="deleteFinding('${finding.id}')"
+                                >
+                                    Eliminar
+                                </button>
+
+                            </div>
+
+                        </div>
+
+
+                        <div class="form-grid">
+
+
+                            <div class="form-group full-width">
+
+                                <label>
+                                    Título
+                                </label>
+
+                                <input
+                                    data-field="titulo"
+                                    value="${escapeAttribute(finding.titulo || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group full-width">
+
+                                <label>
+                                    Descripción
+                                </label>
+
+                                <textarea
+                                    data-field="descripcion"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >${escapeHtml(finding.descripcion || "")}</textarea>
+
+                            </div>
+
+
+                            <div class="form-group full-width">
+
+                                <label>
+                                    Condición / hecho observado
+                                </label>
+
+                                <textarea
+                                    data-field="condicion"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >${escapeHtml(finding.condicion || "")}</textarea>
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Área responsable *
+                                </label>
+
+                                <input
+                                    data-field="area_responsable"
+                                    list="areasResponsables"
+                                    value="${escapeAttribute(finding.area_responsable || "")}"
+                                    placeholder="Escriba o seleccione un área"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                                <datalist id="areasResponsables">
+                                    <option value="Contabilidad">
+                                    <option value="Créditos">
+                                    <option value="Sistemas">
+                                    <option value="Compras">
+                                    <option value="RR.HH.">
+                                    <option value="Operaciones">
+                                    <option value="Tesorería">
+                                    <option value="Comercial">
+                                    <option value="Logística">
+                                </datalist>
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Responsable del plan de acción
+                                </label>
+
+                                <input
+                                    data-field="responsable_plan"
+                                    value="${escapeAttribute(finding.responsable_plan || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Criticidad *
+                                </label>
+
+                                <select
+                                    data-field="criticidad"
+                                    onchange="
+                                        syncFinding('${finding.id}', this);
+                                        renderFindings();
+                                        updateDashboard();
+                                    "
+                                >
+
+                                    <option
+                                        value="high"
+                                        ${criticality === "high" ? "selected" : ""}
+                                    >
+                                        Alto
+                                    </option>
+
+                                    <option
+                                        value="medium"
+                                        ${criticality === "medium" ? "selected" : ""}
+                                    >
+                                        Medio
+                                    </option>
+
+                                    <option
+                                        value="low"
+                                        ${criticality === "low" ? "selected" : ""}
+                                    >
+                                        Bajo
+                                    </option>
+
+                                </select>
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Estado
+                                </label>
+
+                                <select
+                                    data-field="estado"
+                                    onchange="syncFinding('${finding.id}', this)"
+                                >
+
+                                    ${[
+                                        "Pendiente",
+                                        "En análisis",
+                                        "En curso",
+                                        "Implementado",
+                                        "Cerrado"
+                                    ]
+                                        .map(
+                                            value => `
+
+                                            <option
+                                                value="${value}"
+                                                ${finding.estado === value ? "selected" : ""}
+                                            >
+                                                ${value}
+                                            </option>
+
+                                            `
+                                        )
+                                        .join("")
+                                    }
+
+                                </select>
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Fecha objetivo
+                                </label>
+
+                                <input
+                                    type="date"
+                                    data-field="fecha_objetivo"
+                                    value="${escapeAttribute(finding.fecha_objetivo || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Fuente
+                                </label>
+
+                                <input
+                                    data-field="fuente"
+                                    value="${escapeAttribute(finding.fuente || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group full-width">
+
+                                <label>
+                                    Riesgo *
+                                </label>
+
+                                <textarea
+                                    data-field="riesgo"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >${escapeHtml(finding.riesgo || "")}</textarea>
+
+                            </div>
+
+
+                            <div class="form-group full-width">
+
+                                <label>
+                                    Propuesta de mejora *
+                                </label>
+
+                                <textarea
+                                    data-field="propuesta_mejora"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >${escapeHtml(finding.propuesta_mejora || "")}</textarea>
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Fundamento cuantitativo
+                                </label>
+
+                                <input
+                                    data-field="fundamento_cuantitativo"
+                                    value="${escapeAttribute(finding.fundamento_cuantitativo || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Evidencia
+                                </label>
+
+                                <input
+                                    data-field="evidencia"
+                                    value="${escapeAttribute(finding.evidencia || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Referencia / Ticket
+                                </label>
+
+                                <input
+                                    data-field="referencia"
+                                    value="${escapeAttribute(finding.referencia || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+
+                            <div class="form-group">
+
+                                <label>
+                                    Seguimiento
+                                </label>
+
+                                <input
+                                    data-field="seguimiento"
+                                    value="${escapeAttribute(finding.seguimiento || "")}"
+                                    oninput="syncFinding('${finding.id}', this)"
+                                >
+
+                            </div>
+
+                        </div>
+
+                    </article>
+
+                    `;
+                }
             )
+            .join("");
+}
 
-        facts = memo_data.get("hechos_validados", [])
-        if facts:
-            pd.DataFrame([{
-                "Descripción": h.get("description", ""),
-                "Valor": h.get("value", ""),
-                "Fuente": h.get("source", ""),
-                "Referencia": h.get("reference", ""),
-                "Tipo": h.get("kind", ""),
-            } for h in facts]).to_excel(
-                writer, sheet_name="Trazabilidad", index=False
+
+function syncFinding(
+    id,
+    element
+) {
+
+    const finding =
+        state.findings.find(
+            item =>
+                item.id === id
+        );
+
+
+    if (
+        finding
+    ) {
+
+        finding[
+            element.dataset.field
+        ] =
+            element.value;
+    }
+}
+
+
+function deleteFinding(
+    id
+) {
+
+    state.findings =
+        state.findings.filter(
+            finding =>
+                finding.id !== id
+        );
+
+
+    renderFindings();
+
+    updateDashboard();
+}
+
+
+// =========================================================
+// DATOS DEL TRABAJO
+// =========================================================
+
+function collectAuditData() {
+
+    return {
+
+        titulo:
+            $("auditTitle")
+                .value
+                .trim(),
+
+        analisis:
+            $("analysis")
+                .value
+                .trim(),
+
+        sector:
+            $("sector")
+                .value
+                .trim(),
+
+        proceso:
+            $("process")
+                .value
+                .trim(),
+
+        periodo:
+            $("period")
+                .value
+                .trim(),
+
+        alcance:
+            $("scope")
+                .value
+                .trim(),
+
+        fecha:
+            $("workDate")
+                .value,
+
+        auditor:
+            $("auditor")
+                .value
+                .trim(),
+
+        contexto:
+            $("context")
+                .value
+                .trim(),
+
+        instrucciones:
+            $("writingInstructions")
+                .value
+                .trim(),
+
+        objetivos:
+            getObjectives(),
+
+        fuentes:
+            getSources()
+    };
+}
+
+
+// =========================================================
+// VALIDACIONES
+// =========================================================
+
+function validateBeforeMemo() {
+
+    const audit =
+        collectAuditData();
+
+
+    const messages =
+        [];
+
+
+    if (
+        !audit.objetivos.length
+    ) {
+
+        messages.push(
+            "Falta al menos un objetivo."
+        );
+    }
+
+
+    if (
+        !audit.periodo
+    ) {
+
+        messages.push(
+            "Falta el período."
+        );
+    }
+
+
+    if (
+        !state.facts.some(
+            fact =>
+                fact.status ===
+                "accepted"
+        )
+    ) {
+
+        messages.push(
+            "Debe aceptar al menos un hecho."
+        );
+    }
+
+
+    state.findings.forEach(
+        (
+            finding,
+            index
+        ) => {
+
+            const prefix =
+                `Hallazgo ${index + 1}: `;
+
+
+            if (
+                !finding.area_responsable
+            ) {
+
+                messages.push(
+                    `${prefix}falta Área responsable.`
+                );
+            }
+
+
+            if (
+                !finding.riesgo
+            ) {
+
+                messages.push(
+                    `${prefix}falta Riesgo.`
+                );
+            }
+
+
+            if (
+                !finding.propuesta_mejora
+            ) {
+
+                messages.push(
+                    `${prefix}falta Propuesta de mejora.`
+                );
+            }
+        }
+    );
+
+
+    if (
+        messages.length
+    ) {
+
+        notify(
+
+            messages.join(
+                " "
+            ),
+
+            "warning"
+        );
+
+
+        return false;
+    }
+
+
+    return true;
+}
+
+
+// =========================================================
+// GENERAR MEMO
+// =========================================================
+
+async function generateMemo() {
+
+    if (
+        !validateBeforeMemo()
+    ) {
+
+        return;
+    }
+
+
+    const acceptedFacts =
+        state.facts.filter(
+            fact =>
+                fact.status ===
+                "accepted"
+        );
+
+
+    try {
+
+        const response =
+            await fetch(
+
+                "/generate-memo",
+
+                {
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            auditData:
+                                collectAuditData(),
+
+                            validatedFacts:
+                                acceptedFacts,
+
+                            tasks:
+                                state.tasks,
+
+                            results:
+                                state.results,
+
+                            findings:
+                                state.findings,
+
+                            style:
+                                $("memoStyle")
+                                    .value
+                        })
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if (
+            !response.ok
+        ) {
+
+            throw new Error(
+
+                data.error ||
+
+                "No se pudo generar el memo."
+            );
+        }
+
+
+        state.memo =
+            data.memo;
+
+
+        renderMemo(
+            state.memo
+        );
+
+
+        notify(
+
+            data.message ||
+
+            "Memo generado."
+        );
+
+
+    } catch (
+        error
+    ) {
+
+        notify(
+
+            error.message,
+
+            "error"
+        );
+    }
+}
+
+
+// =========================================================
+// PREVIEW DEL MEMO
+// =========================================================
+
+function renderMemo(
+    memo
+) {
+
+    const header =
+        memo.header ||
+        {};
+
+
+    const criticalityLabel = {
+
+        high:
+            "Alto",
+
+        medium:
+            "Medio",
+
+        low:
+            "Bajo"
+    };
+
+
+    const objectives =
+
+        (
+            memo.objetivos ||
+            []
+        )
+            .map(
+                objective =>
+                    `<li>${escapeHtml(objective)}</li>`
             )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay hechos"]}).to_excel(
-                writer, sheet_name="Trazabilidad", index=False
+            .join("")
+
+        ||
+
+        "<li>Sin objetivos.</li>";
+
+
+    const tasks =
+
+        (
+            memo.tareas ||
+            []
+        )
+            .map(
+                task => `
+
+                    <li>
+
+                        <strong>
+                            ${escapeHtml(task.descripcion || "Tarea")}
+                        </strong>
+
+                        ${
+                            task.resultado
+
+                                ? ": " +
+                                    escapeHtml(
+                                        task.resultado
+                                    )
+
+                                : ""
+                        }
+
+                    </li>
+
+                `
             )
+            .join("")
 
-        wb = writer.book
+        ||
 
-        for ws in wb.worksheets:
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
-
-            for cell in ws[1]:
-                cell.fill = PatternFill("solid", fgColor=blue_dark)
-                cell.font = Font(color=white, bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = Border(bottom=thin)
-
-            autosize_sheet(ws)
-
-        memo_ws = wb["MEMO"]
-
-        for row in memo_ws.iter_rows(min_row=2):
-            row[0].fill = PatternFill("solid", fgColor=blue_light)
-            row[0].font = Font(color=blue_dark, bold=True)
-
-            for cell in row:
-                cell.border = Border(bottom=thin)
-
-    output.seek(0)
-
-    return send_file(
-        output,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True,
-        download_name=f"audit_memo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-    )
+        "<li>Sin tareas.</li>";
 
 
-@app.route("/improve-text", methods=["POST"])
-def improve_text():
-    data = request.get_json(silent=True) or {}
-    text = data.get("text", "")
+    const facts =
 
-    return jsonify({
-        "original": text,
-        "improved": text,
-        "message": (
-            "La mejora automática de redacción todavía no tiene IA conectada. "
-            "El texto no fue modificado."
-        ),
-    })
+        (
+            memo.hechos_validados ||
+            []
+        )
+            .map(
+                fact => `
+
+                    <li>
+
+                        ${escapeHtml(fact.description)}:
+
+                        <strong>
+                            ${escapeHtml(fact.value)}
+                        </strong>
+
+                        —
+
+                        Fuente:
+                        ${escapeHtml(fact.source)}
+
+                        ${
+                            fact.reference
+
+                                ? " — Ref.: " +
+                                    escapeHtml(
+                                        fact.reference
+                                    )
+
+                                : ""
+                        }
+
+                    </li>
+
+                `
+            )
+            .join("");
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    const resultRows =
+
+        (
+            memo.resultados ||
+            []
+        )
+            .map(
+                result => `
+
+                    <tr>
+
+                        <td>
+                            ${escapeHtml(result.concepto || "")}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(result.cantidad || "")}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(result.importe || "")}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(result.porcentaje || "")}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(result.clasificacion || "")}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(result.observacion || "")}
+                        </td>
+
+                    </tr>
+
+                `
+            )
+            .join("");
+
+
+    const findings =
+
+        (
+            memo.hallazgos ||
+            []
+        )
+            .map(
+                (
+                    finding,
+                    index
+                ) => `
+
+                    <div
+                        class="memo-finding ${finding.criticidad || "medium"}"
+                    >
+
+                        <strong>
+                            Hallazgo ${String(index + 1).padStart(2, "0")}
+                            –
+                            ${escapeHtml(finding.titulo || "Sin título")}
+                        </strong>
+
+
+                        <br>
+
+
+                        <span
+                            class="criticality-badge criticality-${finding.criticidad || "medium"}"
+                        >
+                            ${criticalityLabel[finding.criticidad] || "N/A"}
+                        </span>
+
+
+                        <p>
+                            <strong>Descripción:</strong>
+                            ${nl2br(finding.descripcion || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Condición:</strong>
+                            ${nl2br(finding.condicion || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Riesgo:</strong>
+                            ${nl2br(finding.riesgo || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Área responsable:</strong>
+                            ${escapeHtml(finding.area_responsable || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Responsable plan:</strong>
+                            ${escapeHtml(finding.responsable_plan || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Propuesta de mejora:</strong>
+                            ${nl2br(finding.propuesta_mejora || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Estado:</strong>
+                            ${escapeHtml(finding.estado || "Pendiente")}
+                        </p>
+
+
+                        <p>
+                            <strong>Fecha objetivo:</strong>
+                            ${escapeHtml(finding.fecha_objetivo || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Fundamento:</strong>
+                            ${escapeHtml(finding.fundamento_cuantitativo || "N/A")}
+                        </p>
+
+
+                        <p>
+                            <strong>Fuente / evidencia:</strong>
+                            ${escapeHtml(finding.fuente || "")}
+                            ${escapeHtml(finding.evidencia || "")}
+                        </p>
+
+                    </div>
+
+                `
+            )
+            .join("")
+
+        ||
+
+        "<p>Sin hallazgos.</p>";
+
+
+    $("memoPreview")
+        .innerHTML = `
+
+            <div
+                class="memo-document"
+                contenteditable="true"
+            >
+
+                <h2>
+                    MEMO DE AUDITORÍA INTERNA
+                </h2>
+
+
+                <table class="memo-header-table">
+
+                    <tr>
+                        <td>Título</td>
+                        <td>${escapeHtml(header.titulo || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Análisis</td>
+                        <td>${escapeHtml(header.analisis || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Sector</td>
+                        <td>${escapeHtml(header.sector || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Proceso</td>
+                        <td>${escapeHtml(header.proceso || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Período</td>
+                        <td>${escapeHtml(header.periodo || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Alcance</td>
+                        <td>${escapeHtml(header.alcance || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Auditor</td>
+                        <td>${escapeHtml(header.auditor || "")}</td>
+                    </tr>
+
+                    <tr>
+                        <td>Fecha</td>
+                        <td>${escapeHtml(header.fecha || "")}</td>
+                    </tr>
+
+                </table>
+
+
+                <h3>
+                    1. Objetivo
+                </h3>
+
+                <ol>
+                    ${objectives}
+                </ol>
+
+
+                <h3>
+                    2. Alcance
+                </h3>
+
+                <p>
+                    ${escapeHtml(header.alcance || "N/A")}
+                </p>
+
+
+                <h3>
+                    3. Tareas realizadas
+                </h3>
+
+                <ol>
+                    ${tasks}
+                </ol>
+
+
+                <h3>
+                    4. Resultados / hechos validados
+                </h3>
+
+                <ul>
+                    ${facts}
+                </ul>
+
+
+                ${
+                    resultRows
+
+                        ? `
+
+                            <table class="memo-result-table">
+
+                                <thead>
+
+                                    <tr>
+                                        <th>Concepto</th>
+                                        <th>Cantidad</th>
+                                        <th>Importe</th>
+                                        <th>%</th>
+                                        <th>Clasificación</th>
+                                        <th>Observación</th>
+                                    </tr>
+
+                                </thead>
+
+                                <tbody>
+                                    ${resultRows}
+                                </tbody>
+
+                            </table>
+
+                        `
+
+                        : ""
+                }
+
+
+                <h3>
+                    5. Hallazgos
+                </h3>
+
+                ${findings}
+
+
+                <h3>
+                    6. Conclusiones
+                </h3>
+
+                <p>
+                    ${nl2br(memo.conclusiones || "N/A")}
+                </p>
+
+            </div>
+
+        `;
+}
+
+
+// =========================================================
+// MEJORAR REDACCIÓN
+// =========================================================
+
+async function improveText() {
+
+    const documentElement =
+        document.querySelector(
+            "#memoPreview .memo-document"
+        );
+
+
+    if (
+        !documentElement
+    ) {
+
+        notify(
+
+            "Primero genere el memo.",
+
+            "warning"
+        );
+
+        return;
+    }
+
+
+    try {
+
+        const response =
+            await fetch(
+
+                "/improve-text",
+
+                {
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            text:
+                                documentElement.innerText,
+
+                            style:
+                                $("memoStyle")
+                                    .value
+                        })
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if (
+            !response.ok
+        ) {
+
+            throw new Error(
+                data.error
+            );
+        }
+
+
+        if (
+            data.improved &&
+            data.improved !==
+                documentElement.innerText
+        ) {
+
+            documentElement.innerText =
+                data.improved;
+        }
+
+
+        notify(
+
+            data.message ||
+
+            "Redacción revisada.",
+
+            data.improved ===
+                documentElement.innerText
+
+                ? "warning"
+
+                : "success"
+        );
+
+
+    } catch (
+        error
+    ) {
+
+        notify(
+
+            error.message,
+
+            "error"
+        );
+    }
+}
+
+
+// =========================================================
+// EXPORTAR
+// =========================================================
+
+async function exportToExcel() {
+
+    if (
+        !state.memo
+    ) {
+
+        notify(
+
+            "Primero genere el memo.",
+
+            "warning"
+        );
+
+        return;
+    }
+
+
+    try {
+
+        const response =
+            await fetch(
+
+                "/export-excel",
+
+                {
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+                            memo:
+                                state.memo
+                        })
+                }
+            );
+
+
+        if (
+            !response.ok
+        ) {
+
+            const data =
+                await response
+                    .json()
+                    .catch(
+                        () => ({})
+                    );
+
+
+            throw new Error(
+
+                data.error ||
+
+                "No se pudo exportar el Excel."
+            );
+        }
+
+
+        const blob =
+            await response.blob();
+
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+
+        const link =
+            document.createElement(
+                "a"
+            );
+
+
+        link.href =
+            url;
+
+
+        link.download =
+            "audit_memo.xlsx";
+
+
+        document.body.appendChild(
+            link
+        );
+
+
+        link.click();
+
+        link.remove();
+
+
+        URL.revokeObjectURL(
+            url
+        );
+
+
+        notify(
+            "Excel exportado."
+        );
+
+
+    } catch (
+        error
+    ) {
+
+        notify(
+
+            error.message,
+
+            "error"
+        );
+    }
+}
+
+
+// =========================================================
+// GUARDAR PROGRESO LOCAL
+// =========================================================
+
+function saveProgress() {
+
+    const data = {
+
+        files:
+            state.files.map(
+                file => ({
+                    name:
+                        file.name,
+                    type:
+                        file.type,
+                    size:
+                        file.size
+                })
+            ),
+
+        facts:
+            state.facts,
+
+        tasks:
+            state.tasks,
+
+        results:
+            state.results,
+
+        findings:
+            state.findings,
+
+        sources:
+            state.sources,
+
+        auditData:
+            collectAuditData()
+    };
+
+
+    localStorage.setItem(
+
+        "auditMemoProgress",
+
+        JSON.stringify(
+            data
+        )
+    );
+
+
+    notify(
+        "Progreso guardado en este navegador."
+    );
+}
+
+
+// =========================================================
+// CARGAR PROGRESO
+// =========================================================
+
+function loadProgress() {
+
+    const saved =
+        localStorage.getItem(
+            "auditMemoProgress"
+        );
+
+
+    if (
+        !saved
+    ) {
+
+        return;
+    }
+
+
+    try {
+
+        const data =
+            JSON.parse(
+                saved
+            );
+
+
+        state.files =
+            [];
+
+
+        state.facts =
+            data.facts ||
+            [];
+
+
+        state.tasks =
+            data.tasks ||
+            [];
+
+
+        state.results =
+            data.results ||
+            [];
+
+
+        state.findings =
+            data.findings ||
+            [];
+
+
+        state.sources =
+            data.sources ||
+            [];
+
+
+        if (
+            data.auditData
+        ) {
+
+            const audit =
+                data.auditData;
+
+
+            $("auditTitle").value =
+                audit.titulo ||
+                "";
+
+
+            $("analysis").value =
+                audit.analisis ||
+                "";
+
+
+            $("sector").value =
+                audit.sector ||
+                "";
+
+
+            $("process").value =
+                audit.proceso ||
+                "";
+
+
+            $("period").value =
+                audit.periodo ||
+                "";
+
+
+            $("scope").value =
+                audit.alcance ||
+                "";
+
+
+            $("workDate").value =
+                audit.fecha ||
+                "";
+
+
+            $("auditor").value =
+                audit.auditor ||
+                "";
+
+
+            $("context").value =
+                audit.contexto ||
+                "";
+
+
+            $("writingInstructions").value =
+                audit.instrucciones ||
+                "";
+
+
+            document
+                .querySelectorAll(
+                    ".objective-row"
+                )
+                .forEach(
+                    element =>
+                        element.remove()
+                );
+
+
+            (
+                audit.objetivos ||
+                []
+            ).forEach(
+                objective =>
+                    addObjective(
+                        objective
+                    )
+            );
+        }
+
+
+        renderFiles();
+
+        renderSources();
+
+        renderFacts();
+
+        renderTasks();
+
+        renderResults();
+
+        renderFindings();
+
+        updateDashboard();
+
+
+        notify(
+
+            "Progreso cargado. Para volver a analizar deberá seleccionar nuevamente los archivos originales.",
+
+            "warning"
+        );
+
+
+    } catch (
+        error
+    ) {
+
+        console.error(
+
+            "Error al recuperar progreso:",
+
+            error
+        );
+    }
+}
+
+
+// =========================================================
+// NUEVO MEMO
+// =========================================================
+
+function newMemo() {
+
+    const confirmReset =
+        confirm(
+
+            "¿Querés iniciar un nuevo memo? Se eliminará el progreso guardado en este navegador."
+        );
+
+
+    if (
+        !confirmReset
+    ) {
+
+        return;
+    }
+
+
+    localStorage.removeItem(
+        "auditMemoProgress"
+    );
+
+
+    location.reload();
+}
+
+
+// =========================================================
+// INICIO
+// =========================================================
+
+document.addEventListener(
+
+    "DOMContentLoaded",
+
+    () => {
+
+        initializeUpload();
+
+
+        $("workDate").value =
+            new Date()
+                .toISOString()
+                .slice(
+                    0,
+                    10
+                );
+
+
+        addObjective();
+
+        renderSources();
+
+        renderFiles();
+
+        renderFacts();
+
+        renderTasks();
+
+        renderResults();
+
+        renderFindings();
+
+        updateDashboard();
+
+        loadProgress();
+    }
+);
