@@ -1,74 +1,593 @@
-const state = { files: [], facts: [], tasks: [], results: [], findings: [], memo: null };
-const $ = (id) => document.getElementById(id);
-function escapeHtml(v) { return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function nl2br(v) { return escapeHtml(v).replace(/\n/g, '<br>'); }
-function notify(msg, type='success') { const n=document.createElement('div'); n.className=`toast ${type}`; n.textContent=msg; document.body.appendChild(n); setTimeout(()=>n.remove(),4200); }
-function fileSize(s) { if(s<1024) return `${s} B`; if(s<1024*1024) return `${(s/1024).toFixed(1)} KB`; return `${(s/(1024*1024)).toFixed(1)} MB`; }
-function updateDashboard() {
-    const accepted = state.facts.filter(f=>f.status==='accepted').length;
-    const counts = {high:0,medium:0,low:0}; state.findings.forEach(f=>{if(f.criticidad) counts[f.criticidad]=(counts[f.criticidad]||0)+1;});
-    const v = {metricFiles:state.files.length, metricFacts:state.facts.length, metricAccepted:accepted, metricTasks:state.tasks.length, metricFindings:state.findings.length, metricHigh:counts.high, metricMedium:counts.medium, metricLow:counts.low};
-    Object.entries(v).forEach(([id,val])=>{if($(id)) $(id).textContent=val;});
-}
-function goToStep(n) {
-    if(n===6 && !validateBeforeMemo()) return;
-    document.querySelectorAll('.step-section').forEach(x=>x.classList.remove('active'));
-    document.querySelectorAll('.step-nav-item').forEach(x=>{const v=Number(x.dataset.step); x.classList.toggle('active',v===n);});
-    $(`step-${n}`).classList.add('active'); window.scrollTo({top:0,behavior:'smooth'});
-}
-function initializeUpload() {
-    const dz=$('dropZone'), input=$('fileInput');
-    dz.addEventListener('click', e=>{if(!e.target.closest('button')) input.click();});
-    dz.addEventListener('dragover', e=>{e.preventDefault(); dz.classList.add('dragging');});
-    dz.addEventListener('dragleave', ()=>dz.classList.remove('dragging'));
-    dz.addEventListener('drop', e=>{e.preventDefault(); dz.classList.remove('dragging'); addFiles([...e.dataTransfer.files]);});
-    input.addEventListener('change', e=>{addFiles([...e.target.files]); input.value='';});
-}
-function addFiles(files) {
-    const valid=['xlsx','xls','docx','pdf','csv','txt']; let rejected=0;
-    files.forEach(file=>{const ext=file.name.split('.').pop().toLowerCase(); if(valid.includes(ext)){state.files.push({id:crypto.randomUUID(),file,name:file.name,type:ext,size:file.size});}else rejected++;});
-    renderFiles(); updateDashboard(); if(rejected) notify(`${rejected} archivo(s) ignorado(s).`,'warning');
-}
-function renderFiles() {
-    const c=$('filesContainer');
-    if(!state.files.length){c.innerHTML='<p class="section-description">Sin archivos.</p>';return;}
-    c.innerHTML=state.files.map(f=>`<div class="file-item"><div class="file-meta"><span class="file-type">${escapeHtml(f.type)}</span><strong>${escapeHtml(f.name)}</strong><span class="file-size">${fileSize(f.size)}</span></div><button class="btn btn-danger btn-sm" onclick="removeFile('${f.id}')">Eliminar</button></div>`).join('');
-}
-function removeFile(id){state.files=state.files.filter(x=>x.id!==id);renderFiles();updateDashboard();}
-function addObjective(text=''){const id=crypto.randomUUID();$('objectivesContainer').insertAdjacentHTML('beforeend',`<div class="objective-row" data-id="${id}"><button class="btn btn-secondary reorder-btn" onclick="moveObjective('${id}',-1)">↑</button><button class="btn btn-secondary reorder-btn" onclick="moveObjective('${id}',1)">↓</button><input type="text" value="${escapeHtml(text)}" placeholder="Objetivo"><button class="btn btn-danger btn-sm" onclick="removeObjective('${id}')">Eliminar</button></div>`);}
-function removeObjective(id){document.querySelector(`.objective-row[data-id="${id}"]`)?.remove();}
-function moveObjective(id,dir){const row=document.querySelector(`.objective-row[data-id="${id}"]`),c=$('objectivesContainer');if(!row)return;if(dir<0&&row.previousElementSibling)c.insertBefore(row,row.previousElementSibling);else if(dir>0&&row.nextElementSibling)c.insertBefore(row.nextElementSibling,row);}
-function getObjectives(){return [...document.querySelectorAll('.objective-row input')].map(x=>x.value.trim()).filter(Boolean);}
-function getSources(){return [...document.querySelectorAll('#sourcesContainer input:checked')].map(x=>x.value);}
-async function analyzeDocuments() {
-    if(!state.files.length && !$('freeText').value.trim()){notify('Cargue archivos o texto libre.','warning');return;}
-    const btn=event?.currentTarget; if(btn){btn.disabled=true;btn.textContent='Analizando...';}
-    try{const res=await fetch('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:state.files.map(f=>({filename:f.name,type:f.type,size:f.size})),freeText:$('freeText').value})});const data=await res.json();if(!res.ok)throw new Error(data.error);state.facts=data.facts||[];renderFacts();updateDashboard();notify(data.message||'Hechos identificados.');}catch(e){notify(e.message,'error');}finally{if(btn){btn.disabled=false;btn.textContent='🔍 Analizar Documentacion';}}
-}
-function renderFacts() {
-    const c=$('factsContainer');if(!state.facts.length){c.innerHTML='<p class="section-description">Sin hechos.</p>';return;}
-    c.innerHTML=state.facts.map(f=>{const st=f.status||'pending';return `<article class="fact-card ${st}"><div class="fact-title">${escapeHtml(f.description)}<span class="status-badge status-${st}">${st==='accepted'?'Aceptado':st==='discarded'?'Descartado':'Pendiente'}</span></div><div class="fact-value">${escapeHtml(f.value||'Informacion no identificada.')}</div><div class="fact-meta"><strong>Fuente:</strong> ${escapeHtml(f.source||'N/A')} | <strong>Ref:</strong> ${escapeHtml(f.reference||'N/A')}</div><div class="fact-actions"><button class="btn btn-success btn-sm" onclick="setFactStatus(${f.id},'accepted')">Aceptar</button><button class="btn btn-secondary btn-sm" onclick="editFact(${f.id})">Editar</button><button class="btn btn-danger btn-sm" onclick="setFactStatus(${f.id},'discarded')">Descartar</button></div></article>`;}).join('');
-}
-function setFactStatus(id,st){const f=state.facts.find(x=>x.id===id);if(f){f.status=st;renderFacts();updateDashboard();}}
-function editFact(id){const f=state.facts.find(x=>x.id===id);if(!f)return;const d=prompt('Descripcion:',f.description);if(d===null)return;const v=prompt('Valor:',f.value||'');if(v===null)return;const s=prompt('Fuente:',f.source||'');if(s===null)return;const r=prompt('Referencia:',f.reference||'');if(r===null)return;Object.assign(f,{description:d,value:v,source:s,reference:r,status:'accepted'});renderFacts();updateDashboard();}
-function addTask(data={}){const id=crypto.randomUUID();state.tasks.push({id,...data});renderTasks();updateDashboard();}
-function renderTasks(){const c=$('tasksContainer');c.innerHTML=state.tasks.map((t,i)=>`<div class="task-card" data-id="${t.id}"><div class="task-card-header"><h4>Tarea ${String(i+1).padStart(2,'0')}</h4><button class="btn btn-danger btn-sm" onclick="deleteTask('${t.id}')">Eliminar</button></div><div class="form-group"><label>Descripcion</label><textarea data-field="descripcion" oninput="syncTask('${t.id}',this)">${escapeHtml(t.descripcion||'')}</textarea></div><div class="inline-grid"><div class="form-group"><label>Fuente</label><input data-field="fuente" value="${escapeHtml(t.fuente||'')}" oninput="syncTask('${t.id}',this)"></div><div class="form-group"><label>Evidencia</label><input data-field="evidencia" value="${escapeHtml(t.evidencia||'')}" oninput="syncTask('${t.id}',this)"></div></div><div class="inline-grid"><div class="form-group"><label>Resultado</label><textarea data-field="resultado" oninput="syncTask('${t.id}',this)">${escapeHtml(t.resultado||'')}</textarea></div><div class="form-group"><label>Referencia</label><input data-field="referencia" value="${escapeHtml(t.referencia||'')}" oninput="syncTask('${t.id}',this)"></div></div></div>`).join('');}
-function syncTask(id,el){const t=state.tasks.find(x=>x.id===id);if(t)t[el.dataset.field]=el.value;}
-function deleteTask(id){state.tasks=state.tasks.filter(x=>x.id!==id);renderTasks();updateDashboard();}
-function addResult(data={}){const id=crypto.randomUUID();state.results.push({id,...data});renderResults();}
-function renderResults(){const c=$('resultsContainer');c.innerHTML=state.results.map((r,i)=>`<div class="result-card" data-id="${r.id}"><div class="result-card-header"><h4>Resultado ${String(i+1).padStart(2,'0')}</h4><button class="btn btn-danger btn-sm" onclick="deleteResult('${r.id}')">Eliminar</button></div><div class="inline-grid"><div class="form-group"><label>Concepto</label><input data-field="concepto" value="${escapeHtml(r.concepto||'')}" oninput="syncResult('${r.id}',this)"></div><div class="form-group"><label>Clasificacion</label><select data-field="clasificacion" oninput="syncResult('${r.id}',this)"><option value="Hallazgo"${r.clasificacion==='Hallazgo'?' selected':''}>Hallazgo</option><option value="Observacion"${r.clasificacion==='Observacion'?' selected':''}>Observacion</option><option value="Oportunidad"${r.clasificacion==='Oportunidad'?' selected':''}>Oportunidad</option><option value="Sin excepcion"${r.clasificacion==='Sin excepcion'?' selected':''}>Sin excepcion</option></select></div></div><div class="inline-grid"><div class="form-group"><label>Cantidad</label><input data-field="cantidad" value="${escapeHtml(r.cantidad||'')}" oninput="syncResult('${r.id}',this)"></div><div class="form-group"><label>Importe</label><input data-field="importe" value="${escapeHtml(r.importe||'')}" oninput="syncResult('${r.id}',this)"></div><div class="form-group"><label>Porcentaje</label><input data-field="porcentaje" value="${escapeHtml(r.porcentaje||'')}" oninput="syncResult('${r.id}',this)"></div><div class="form-group"><label>Observacion</label><input data-field="observacion" value="${escapeHtml(r.observacion||'')}" oninput="syncResult('${r.id}',this)"></div></div></div>`).join('');}
-function syncResult(id,el){const r=state.results.find(x=>x.id===id);if(r)r[el.dataset.field]=el.value;}
-function deleteResult(id){state.results=state.results.filter(x=>x.id!==id);renderResults();}
-function addFinding(data={criticidad:'medium',estado:'Pendiente'}){const id=crypto.randomUUID();state.findings.push({id,...data});renderFindings();updateDashboard();}
-function renderFindings(){const c=$('findingsContainer');c.innerHTML=state.findings.map((f,i)=>{const cr=f.criticidad||'medium';return `<article class="finding-card ${cr}" data-id="${f.id}"><div class="finding-header"><div><span class="finding-number">Hallazgo ${String(i+1).padStart(2,'0')}</span><h4>${escapeHtml(f.titulo||'Nuevo')}</h4></div><div><span class="criticality-badge criticality-${cr}">${cr==='high'?'🔴 Alto':cr==='medium'?'🟡 Medio':'🟢 Bajo'}</span><button class="btn btn-danger btn-sm" onclick="deleteFinding('${f.id}')">Eliminar</button></div></div><div class="form-grid"><div class="form-group full-width"><label>Titulo</label><input data-field="titulo" value="${escapeHtml(f.titulo||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group full-width"><label>Descripcion</label><textarea data-field="descripcion" oninput="syncFinding('${f.id}',this)">${escapeHtml(f.descripcion||'')}</textarea></div><div class="form-group full-width"><label>Condicion</label><textarea data-field="condicion" oninput="syncFinding('${f.id}',this)">${escapeHtml(f.condicion||'')}</textarea></div><div class="form-group"><label>Area responsable *</label><select data-field="area_responsable" oninput="syncFinding('${f.id}',this)"><option value="">Seleccione</option>${['Contabilidad','Creditos','Sistemas','Compras','RR.HH.','Operaciones','Tesoreria','Comercial','Logistica','Otra'].map(v=>`<option${f.area_responsable===v?' selected':''}>${v}</option>`).join('')}</select></div><div class="form-group"><label>Responsable plan</label><input data-field="responsable_plan" value="${escapeHtml(f.responsable_plan||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group"><label>Criticidad *</label><select data-field="criticidad" onchange="syncFinding('${f.id}',this);renderFindings();updateDashboard()"><option value="high"${cr==='high'?' selected':''}>Alto</option><option value="medium"${cr==='medium'?' selected':''}>Medio</option><option value="low"${cr==='low'?' selected':''}>Bajo</option></select></div><div class="form-group"><label>Estado</label><select data-field="estado" oninput="syncFinding('${f.id}',this)">${['Pendiente','En analisis','En curso','Implementado','Cerrado'].map(v=>`<option${f.estado===v?' selected':''}>${v}</option>`).join('')}</select></div><div class="form-group"><label>Fecha objetivo</label><input type="date" data-field="fecha_objetivo" value="${escapeHtml(f.fecha_objetivo||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group"><label>Fuente</label><input data-field="fuente" value="${escapeHtml(f.fuente||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group full-width"><label>Riesgo *</label><textarea data-field="riesgo" oninput="syncFinding('${f.id}',this)">${escapeHtml(f.riesgo||'')}</textarea></div><div class="form-group full-width"><label>Propuesta mejora *</label><textarea data-field="propuesta_mejora" oninput="syncFinding('${f.id}',this)">${escapeHtml(f.propuesta_mejora||'')}</textarea></div><div class="form-group"><label>Fundamento</label><input data-field="fundamento_cuantitativo" value="${escapeHtml(f.fundamento_cuantitativo||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group"><label>Evidencia</label><input data-field="evidencia" value="${escapeHtml(f.evidencia||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group"><label>Referencia</label><input data-field="referencia" value="${escapeHtml(f.referencia||'')}" oninput="syncFinding('${f.id}',this)"></div><div class="form-group"><label>Seguimiento</label><input data-field="seguimiento" value="${escapeHtml(f.seguimiento||'')}" oninput="syncFinding('${f.id}',this)"></div></div></article>`;}).join('');}
-function syncFinding(id,el){const f=state.findings.find(x=>x.id===id);if(f)f[el.dataset.field]=el.value;}
-function deleteFinding(id){state.findings=state.findings.filter(x=>x.id!==id);renderFindings();updateDashboard();}
-function collectAuditData(){return{titulo:$('auditTitle').value.trim(),analisis:$('analysis').value.trim(),sector:$('sector').value.trim(),proceso:$('process').value.trim(),periodo:$('period').value.trim(),alcance:$('scope').value.trim(),fecha:$('workDate').value,auditor:$('auditor').value.trim(),contexto:$('context').value.trim(),instrucciones:$('writingInstructions').value.trim(),objetivos:getObjectives(),fuentes:getSources()};}
-function validateBeforeMemo(){const a=collectAuditData(),m=[];if(!a.objetivos.length)m.push('Falta objetivo.');if(!a.periodo)m.push('Falta periodo.');if(!state.facts.some(f=>f.status==='accepted'))m.push('Falta hecho aceptado.');state.findings.forEach((f,i)=>{const p=`Hallazgo ${i+1}:`;if(!f.area_responsable)m.push(`${p}falta area.`);if(!f.riesgo)m.push(`${p}falta riesgo.`);if(!f.propuesta_mejora)m.push(`${p}falta propuesta.`);});if(m.length){notify(m.join(' '),'warning');return false;}return true;}
-async function generateMemo(){if(!validateBeforeMemo())return;const accepted=state.facts.filter(f=>f.status==='accepted');try{const res=await fetch('/generate-memo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auditData:collectAuditData(),validatedFacts:accepted,tasks:state.tasks,results:state.results,findings:state.findings,style:$('memoStyle').value})});const data=await res.json();if(!res.ok)throw new Error(data.error);state.memo=data.memo;renderMemo(state.memo);notify('Memo generado.');}catch(e){notify(e.message,'error');}}
-function renderMemo(m){const h=m.header||{},crit={high:'Alto',medium:'Medio',low:'Bajo'};const goals=(m.objetivos||[]).map(x=>`<li>${escapeHtml(x)}</li>`).join('')||'<li>Sin objetivos.</li>';const tasks=(m.tareas||[]).map(t=>`<li><strong>${escapeHtml(t.descripcion||'Tarea')}</strong>${t.resultado?`: ${escapeHtml(t.resultado)}`:''}</li>`).join('')||'<li>Sin tareas.</li>';const facts=(m.hechos_validados||[]).map(f=>`<li>${escapeHtml(f.description)}: <strong>${escapeHtml(f.value)}</strong> — Fuente: ${escapeHtml(f.source)}</li>`).join('');const rows=(m.resultados||[]).map(r=>`<tr><td>${escapeHtml(r.concepto||'')}</td><td>${escapeHtml(r.cantidad||'')}</td><td>${escapeHtml(r.importe||'')}</td><td>${escapeHtml(r.porcentaje||'')}</td><td>${escapeHtml(r.clasificacion||'')}</td><td>${escapeHtml(r.observacion||'')}</td></tr>`).join('');const findings=(m.hallazgos||[]).map((f,i)=>`<div class="memo-finding ${f.criticidad||'medium'}"><strong>Hallazgo ${String(i+1).padStart(2,'0')} – ${escapeHtml(f.titulo||'Sin titulo')}</strong><br><span class="criticality-badge criticality-${f.criticidad||'medium'}">${crit[f.criticidad]||'N/A'}</span><p><strong>Descripcion:</strong> ${nl2br(f.descripcion||'N/A')}</p><p><strong>Riesgo:</strong> ${nl2br(f.riesgo||'N/A')}</p><p><strong>Area:</strong> ${escapeHtml(f.area_responsable||'N/A')}<br><strong>Propuesta:</strong> ${nl2br(f.propuesta_mejora||'N/A')}<br><strong>Estado:</strong> ${escapeHtml(f.estado||'Pendiente')}<br><strong>Fundamento:</strong> ${escapeHtml(f.fundamento_cuantitativo||'N/A')}</p></div>`).join('')||'<p>Sin hallazgos.</p>';$('memoPreview').innerHTML=`<div class="memo-document" contenteditable="true"><h2>MEMO DE AUDITORIA INTERNA</h2><table class="memo-header-table"><tr><td>Analisis</td><td>${escapeHtml(h.analisis)}</td></tr><tr><td>Sector</td><td>${escapeHtml(h.sector)}</td></tr><tr><td>Periodo</td><td>${escapeHtml(h.periodo)}</td></tr><tr><td>Alcance</td><td>${escapeHtml(h.alcance)}</td></tr><tr><td>Auditor</td><td>${escapeHtml(h.auditor)}</td></tr><tr><td>Fecha</td><td>${escapeHtml(h.fecha)}</td></tr></table><h3>1. Objetivo</h3><ol>${goals}</ol><h3>2. Alcance</h3><p>${escapeHtml(h.alcance||'N/A')}</p><h3>3. Tareas</h3><ol>${tasks}</ol><h3>4. Resultados</h3><ul>${facts}</ul>${rows?`<table class="memo-result-table"><thead><tr><th>Concepto</th><th>Cant</th><th>Importe</th><th>%</th><th>Clasif</th><th>Obs</th></tr></thead><tbody>${rows}</tbody></table>`:''}<h3>5. Hallazgos</h3>${findings}<h3>6. Conclusiones</h3><p>${nl2br(m.conclusiones||'N/A')}</p></div>`;}
-async function improveText(){const doc=$('#memoPreview .memo-document');if(!doc){notify('Primero genere el memo.','warning');return;}try{const res=await fetch('/improve-text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:doc.innerText,style:$('memoStyle').value})});const data=await res.json();if(!res.ok)throw new Error(data.error);if(data.improved&&data.improved!==doc.innerText){doc.innerText=data.improved;}notify(data.message||'Redaccion revisada.');}catch(e){notify(e.message,'error');}}
-async function exportToExcel(){if(!state.memo){notify('Primero genere el memo.','warning');return;}try{const res=await fetch('/export-excel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({memo:state.memo})});if(!res.ok){const d=await res.json().catch(()=>({}));throw new Error(d.error||'Error exportando');}const blob=await res.blob();const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='audit_memo.xlsx';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);notify('Excel exportado.');}catch(e){notify(e.message,'error');}}
-function saveProgress(){const data={files:state.files.map(f=>({name:f.name,type:f.type,size:f.size})),facts:state.facts,tasks:state.tasks,results:state.results,findings:state.findings,auditData:collectAuditData()};localStorage.setItem('auditMemoProgress',JSON.stringify(data));notify('Progreso guardado.');}
-function loadProgress(){const saved=localStorage.getItem('auditMemoProgress');if(saved){try{const data=JSON.parse(saved);state.facts=data.facts||[];state.tasks=data.tasks||[];state.results=data.results||[];state.findings=data.findings||[];if(data.auditData){const a=data.auditData;$('auditTitle').value=a.titulo||'';$('analysis').value=a.analisis||'';$('sector').value=a.sector||'';$('process').value=a.proceso||'';$('period').value=a.periodo||'';$('scope').value=a.alcance||'';$('workDate').value=a.fecha||'';$('auditor').value=a.auditor||'';$('context').value=a.contexto||'';$('writingInstructions').value=a.instrucciones||'';a.objetivos?.forEach(obj=>addObjective(obj));a.fuentes?.forEach(src=>{const cb=document.querySelector(`#sourcesContainer input[value="${src}"]`);if(cb)cb.checked=true;});}renderFiles();renderFacts();renderTasks();renderResults();renderFindings();updateDashboard();notify('Progreso cargado.');}catch(e){console.error('Error loading:',e);}}}
-document.addEventListener('DOMContentLoaded',()=>{initializeUpload();addObjective();$('workDate').value=new Date().toISOString().slice(0,10);updateDashboard();loadProgress();});
+from flask import Flask, render_template, request, jsonify, send_file
+from datetime import datetime
+from io import BytesIO
+import re
+
+import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from docx import Document
+from pypdf import PdfReader
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+ALLOWED_EXTENSIONS = {"xlsx", "xls", "csv", "docx", "pdf", "txt"}
+
+MONEY_KEYWORDS = (
+    "importe", "monto", "saldo", "total", "valor", "deuda",
+    "capital", "pago", "cuota", "debe", "haber"
+)
+
+DATE_KEYWORDS = (
+    "fecha", "date", "vto", "venc", "vencimiento", "emision",
+    "emisión", "contabil"
+)
+
+
+def clean_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def add_fact(facts, description, value, source, reference, kind="fact"):
+    facts.append({
+        "id": len(facts) + 1,
+        "description": clean_text(description),
+        "value": clean_text(value),
+        "source": clean_text(source),
+        "reference": clean_text(reference),
+        "status": "pending",
+        "kind": kind,
+    })
+
+
+def read_csv_bytes(raw):
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "latin1"):
+        try:
+            return pd.read_csv(BytesIO(raw), low_memory=False, encoding=encoding)
+        except Exception as exc:
+            last_error = exc
+    raise last_error
+
+
+def numeric_series(series):
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    txt = (
+        series.astype(str)
+        .str.strip()
+        .str.replace(r"[^0-9,.\-()]", "", regex=True)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+    )
+
+    def parse_one(v):
+        if v in ("", "-", ".", ",", "nan", "None"):
+            return None
+        try:
+            if "," in v and "." in v:
+                if v.rfind(",") > v.rfind("."):
+                    v = v.replace(".", "").replace(",", ".")
+                else:
+                    v = v.replace(",", "")
+            elif "," in v:
+                parts = v.split(",")
+                if len(parts[-1]) in (1, 2):
+                    v = v.replace(".", "").replace(",", ".")
+                else:
+                    v = v.replace(",", "")
+            return float(v)
+        except Exception:
+            return None
+
+    return txt.map(parse_one)
+
+
+def dataframe_facts(df, filename, reference, facts):
+    add_fact(
+        facts,
+        "Cantidad de registros identificados",
+        f"{len(df):,}".replace(",", "."),
+        filename,
+        reference,
+        "structure",
+    )
+
+    add_fact(
+        facts,
+        "Columnas identificadas",
+        ", ".join(str(c) for c in df.columns),
+        filename,
+        reference,
+        "structure",
+    )
+
+    duplicates = int(df.duplicated().sum())
+    if duplicates:
+        add_fact(
+            facts,
+            "Filas completamente duplicadas",
+            str(duplicates),
+            filename,
+            reference,
+            "quality",
+        )
+
+    missing = int(df.isna().sum().sum())
+    if missing:
+        add_fact(
+            facts,
+            "Celdas vacías identificadas",
+            str(missing),
+            filename,
+            reference,
+            "quality",
+        )
+
+    amount_added = 0
+
+    for col in df.columns:
+        col_text = str(col).strip()
+        low = col_text.lower()
+
+        if amount_added < 8 and any(k in low for k in MONEY_KEYWORDS):
+            nums = numeric_series(df[col])
+            valid = int(nums.notna().sum())
+
+            if len(df) and valid / max(len(df), 1) >= 0.60 and valid:
+                total = float(nums.fillna(0).sum())
+                add_fact(
+                    facts,
+                    f"Total de la columna '{col_text}'",
+                    f"{total:,.2f}",
+                    filename,
+                    reference,
+                    "numeric",
+                )
+                amount_added += 1
+
+        if any(k in low for k in DATE_KEYWORDS):
+            dates = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+            valid_dates = int(dates.notna().sum())
+
+            if len(df) and valid_dates / max(len(df), 1) >= 0.60 and valid_dates:
+                add_fact(
+                    facts,
+                    f"Rango de fechas de la columna '{col_text}'",
+                    f"{dates.min().date().isoformat()} a {dates.max().date().isoformat()}",
+                    filename,
+                    reference,
+                    "date",
+                )
+
+
+def spreadsheet_facts(raw, filename, ext, facts):
+    if ext == "csv":
+        df = read_csv_bytes(raw)
+        dataframe_facts(df, filename, filename, facts)
+        return
+
+    engine = "xlrd" if ext == "xls" else "openpyxl"
+    excel = pd.ExcelFile(BytesIO(raw), engine=engine)
+
+    add_fact(
+        facts,
+        "Hojas identificadas en el archivo",
+        ", ".join(excel.sheet_names),
+        filename,
+        filename,
+        "structure",
+    )
+
+    for sheet in excel.sheet_names[:12]:
+        df = pd.read_excel(excel, sheet_name=sheet)
+        dataframe_facts(
+            df,
+            filename,
+            f"{filename} | Hoja: {sheet}",
+            facts,
+        )
+
+
+def text_blocks(text, size=1600, limit=5):
+    text = clean_text(text)
+    if not text:
+        return []
+
+    blocks = []
+    pos = 0
+
+    while pos < len(text) and len(blocks) < limit:
+        end = min(pos + size, len(text))
+
+        if end < len(text):
+            cut = text.rfind(". ", pos, end)
+            if cut > pos + 300:
+                end = cut + 1
+
+        blocks.append(text[pos:end].strip())
+        pos = end
+
+    return [b for b in blocks if b]
+
+
+def docx_facts(raw, filename, facts):
+    doc = Document(BytesIO(raw))
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+
+    add_fact(
+        facts,
+        "Párrafos con contenido identificados",
+        str(len(paragraphs)),
+        filename,
+        filename,
+        "structure",
+    )
+
+    if doc.tables:
+        add_fact(
+            facts,
+            "Tablas identificadas",
+            str(len(doc.tables)),
+            filename,
+            filename,
+            "structure",
+        )
+
+    text = "\n".join(paragraphs)
+
+    for i, block in enumerate(text_blocks(text), start=1):
+        add_fact(
+            facts,
+            f"Extracto textual identificado {i}",
+            block,
+            filename,
+            f"{filename} | Texto extraído",
+            "text",
+        )
+
+
+def pdf_facts(raw, filename, facts):
+    reader = PdfReader(BytesIO(raw))
+
+    add_fact(
+        facts,
+        "Cantidad de páginas identificadas",
+        str(len(reader.pages)),
+        filename,
+        filename,
+        "structure",
+    )
+
+    extracted = []
+
+    for page_no, page in enumerate(reader.pages[:20], start=1):
+        try:
+            txt = clean_text(page.extract_text() or "")
+        except Exception:
+            txt = ""
+
+        if txt:
+            extracted.append((page_no, txt))
+
+    if not extracted:
+        add_fact(
+            facts,
+            "Resultado de extracción de texto",
+            "No se pudo extraer texto del PDF. Puede tratarse de un documento escaneado.",
+            filename,
+            filename,
+            "warning",
+        )
+        return
+
+    for page_no, txt in extracted[:5]:
+        add_fact(
+            facts,
+            f"Extracto textual identificado - página {page_no}",
+            txt[:1800],
+            filename,
+            f"{filename} | Página {page_no}",
+            "text",
+        )
+
+
+def txt_facts(raw, filename, facts):
+    text = None
+
+    for encoding in ("utf-8-sig", "utf-8", "latin1"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except Exception:
+            pass
+
+    if text is None:
+        raise ValueError("No se pudo decodificar el archivo de texto.")
+
+    for i, block in enumerate(text_blocks(text), start=1):
+        add_fact(
+            facts,
+            f"Extracto textual identificado {i}",
+            block,
+            filename,
+            filename,
+            "text",
+        )
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze_documents():
+    files = request.files.getlist("files")
+    free_text = request.form.get("freeText", "").strip()
+
+    if not files and not free_text:
+        return jsonify(error="Cargue al menos un archivo o texto libre."), 400
+
+    facts = []
+    errors = []
+
+    for uploaded in files:
+        filename = uploaded.filename or "archivo_sin_nombre"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        if ext not in ALLOWED_EXTENSIONS:
+            errors.append(f"{filename}: formato no admitido.")
+            continue
+
+        try:
+            raw = uploaded.read()
+
+            if ext in {"xlsx", "xls", "csv"}:
+                spreadsheet_facts(raw, filename, ext, facts)
+            elif ext == "docx":
+                docx_facts(raw, filename, facts)
+            elif ext == "pdf":
+                pdf_facts(raw, filename, facts)
+            elif ext == "txt":
+                txt_facts(raw, filename, facts)
+
+        except Exception as exc:
+            errors.append(f"{filename}: {str(exc)}")
+
+    if free_text:
+        for i, block in enumerate(text_blocks(free_text), start=1):
+            add_fact(
+                facts,
+                f"Texto libre aportado por el auditor {i}",
+                block,
+                "Texto libre",
+                "Ingreso manual",
+                "text",
+            )
+
+    message = (
+        f"Se extrajeron {len(facts)} elementos objetivos de la documentación. "
+        "Revise cada uno antes de aceptarlo."
+        if facts
+        else "No se identificaron hechos verificables en la documentación cargada."
+    )
+
+    return jsonify({
+        "facts": facts,
+        "message": message,
+        "errors": errors,
+    })
+
+
+@app.route("/generate-memo", methods=["POST"])
+def generate_memo():
+    data = request.get_json(silent=True) or {}
+    audit_data = data.get("auditData", {})
+    validated_facts = data.get("validatedFacts", [])
+    tasks = data.get("tasks", [])
+    results = data.get("results", [])
+    findings = data.get("findings", [])
+    style = data.get("style", "ejecutivo")
+
+    if not validated_facts:
+        return jsonify(error="Debe existir al menos un hecho validado por el auditor."), 400
+
+    memo = {
+        "header": {
+            "titulo": audit_data.get("titulo", "Auditoría"),
+            "analisis": audit_data.get("analisis", ""),
+            "sector": audit_data.get("sector", ""),
+            "proceso": audit_data.get("proceso", ""),
+            "periodo": audit_data.get("periodo", ""),
+            "alcance": audit_data.get("alcance", ""),
+            "auditor": audit_data.get("auditor", ""),
+            "fecha": audit_data.get("fecha", datetime.now().strftime("%d/%m/%Y")),
+        },
+        "objetivos": audit_data.get("objetivos", []),
+        "fuentes": audit_data.get("fuentes", []),
+        "hechos_validados": validated_facts,
+        "tareas": tasks,
+        "resultados": results,
+        "hallazgos": findings,
+        "estilo": style,
+        "conclusiones": (
+            f"Se registraron {len(findings)} hallazgo(s) en el trabajo. "
+            "La conclusión final debe ser revisada y completada por el auditor "
+            "sobre la base de los hechos aceptados y la evidencia disponible."
+        ),
+    }
+
+    return jsonify({
+        "memo": memo,
+        "message": "Borrador de memo generado con la información validada.",
+    })
+
+
+def autosize_sheet(ws, max_width=55):
+    for column_cells in ws.columns:
+        length = 0
+        letter = column_cells[0].column_letter
+
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            length = max(length, min(len(value), max_width))
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        ws.column_dimensions[letter].width = max(12, min(length + 2, max_width))
+
+
+@app.route("/export-excel", methods=["POST"])
+def export_excel():
+    data = request.get_json(silent=True) or {}
+    memo_data = data.get("memo", {})
+    output = BytesIO()
+
+    blue_dark = "17365D"
+    blue_light = "EAF2F8"
+    white = "FFFFFF"
+    thin = Side(style="thin", color="D9E1E8")
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        header = memo_data.get("header", {})
+
+        memo_rows = [
+            ["TÍTULO", header.get("titulo", "")],
+            ["ANÁLISIS", header.get("analisis", "")],
+            ["SECTOR", header.get("sector", "")],
+            ["PROCESO", header.get("proceso", "")],
+            ["PERÍODO", header.get("periodo", "")],
+            ["ALCANCE", header.get("alcance", "")],
+            ["AUDITOR", header.get("auditor", "")],
+            ["FECHA", header.get("fecha", "")],
+            ["OBJETIVOS", "\n".join(f"{i+1}. {x}" for i, x in enumerate(memo_data.get("objetivos", [])))],
+            ["CONCLUSIONES", memo_data.get("conclusiones", "")],
+        ]
+
+        pd.DataFrame(memo_rows, columns=["Campo", "Valor"]).to_excel(
+            writer, sheet_name="MEMO", index=False
+        )
+
+        findings = memo_data.get("hallazgos", [])
+        finding_fields = [
+            "titulo", "descripcion", "condicion", "area_responsable",
+            "responsable_plan", "criticidad", "estado", "fecha_objetivo",
+            "riesgo", "propuesta_mejora", "fundamento_cuantitativo",
+            "fuente", "evidencia", "referencia", "seguimiento"
+        ]
+
+        if findings:
+            pd.DataFrame([
+                {field: h.get(field, "") for field in finding_fields}
+                for h in findings
+            ]).to_excel(writer, sheet_name="Hallazgos", index=False)
+        else:
+            pd.DataFrame({"Mensaje": ["No hay hallazgos"]}).to_excel(
+                writer, sheet_name="Hallazgos", index=False
+            )
+
+        results = memo_data.get("resultados", [])
+        if results:
+            pd.DataFrame(results).drop(columns=["id"], errors="ignore").to_excel(
+                writer, sheet_name="Resultados", index=False
+            )
+        else:
+            pd.DataFrame({"Mensaje": ["No hay resultados"]}).to_excel(
+                writer, sheet_name="Resultados", index=False
+            )
+
+        sources = memo_data.get("fuentes", [])
+        if sources:
+            source_rows = []
+            for src in sources:
+                if isinstance(src, dict):
+                    source_rows.append({
+                        "Nombre": src.get("name", ""),
+                        "Tipo": src.get("type", ""),
+                        "Referencia": src.get("reference", ""),
+                        "Descripción": src.get("description", ""),
+                    })
+                else:
+                    source_rows.append({
+                        "Nombre": str(src),
+                        "Tipo": "",
+                        "Referencia": "",
+                        "Descripción": "",
+                    })
+
+            pd.DataFrame(source_rows).to_excel(
+                writer, sheet_name="Fuentes", index=False
+            )
+        else:
+            pd.DataFrame({"Mensaje": ["No hay fuentes"]}).to_excel(
+                writer, sheet_name="Fuentes", index=False
+            )
+
+        facts = memo_data.get("hechos_validados", [])
+        if facts:
+            pd.DataFrame([{
+                "Descripción": h.get("description", ""),
+                "Valor": h.get("value", ""),
+                "Fuente": h.get("source", ""),
+                "Referencia": h.get("reference", ""),
+                "Tipo": h.get("kind", ""),
+            } for h in facts]).to_excel(
+                writer, sheet_name="Trazabilidad", index=False
+            )
+        else:
+            pd.DataFrame({"Mensaje": ["No hay hechos"]}).to_excel(
+                writer, sheet_name="Trazabilidad", index=False
+            )
+
+        wb = writer.book
+
+        for ws in wb.worksheets:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+
+            for cell in ws[1]:
+                cell.fill = PatternFill("solid", fgColor=blue_dark)
+                cell.font = Font(color=white, bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = Border(bottom=thin)
+
+            autosize_sheet(ws)
+
+        memo_ws = wb["MEMO"]
+
+        for row in memo_ws.iter_rows(min_row=2):
+            row[0].fill = PatternFill("solid", fgColor=blue_light)
+            row[0].font = Font(color=blue_dark, bold=True)
+
+            for cell in row:
+                cell.border = Border(bottom=thin)
+
+    output.seek(0)
+
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"audit_memo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    )
+
+
+@app.route("/improve-text", methods=["POST"])
+def improve_text():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+
+    return jsonify({
+        "original": text,
+        "improved": text,
+        "message": (
+            "La mejora automática de redacción todavía no tiene IA conectada. "
+            "El texto no fue modificado."
+        ),
+    })
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
