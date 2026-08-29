@@ -1,593 +1,1373 @@
 from flask import Flask, render_template, request, jsonify, send_file
-from datetime import datetime
-from io import BytesIO
-import re
-
-import pandas as pd
+from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from docx import Document
 from pypdf import PdfReader
+from io import BytesIO, StringIO
+from tempfile import NamedTemporaryFile
+from datetime import datetime
+import csv
+import os
+import re
+import unicodedata
+import uuid
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
-ALLOWED_EXTENSIONS = {"xlsx", "xls", "csv", "docx", "pdf", "txt"}
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
-MONEY_KEYWORDS = (
-    "importe", "monto", "saldo", "total", "valor", "deuda",
-    "capital", "pago", "cuota", "debe", "haber"
-)
 
-DATE_KEYWORDS = (
-    "fecha", "date", "vto", "venc", "vencimiento", "emision",
-    "emisión", "contabil"
-)
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+ALLOWED_EXTENSIONS = {
+    "xlsx",
+    "xls",
+    "csv",
+    "docx",
+    "pdf",
+    "txt",
+}
+
+
+KEYWORD_GROUPS = {
+    "Hallazgo": [
+        "hallazgo",
+        "hallazgos",
+    ],
+    "Conclusión": [
+        "conclusion",
+        "conclusiones",
+    ],
+    "Diferencia": [
+        "diferencia",
+        "diferencias",
+        "discrepancia",
+        "discrepancias",
+    ],
+    "Observación": [
+        "observacion",
+        "observaciones",
+        "desvio",
+        "desvios",
+    ],
+    "Resultado": [
+        "resultado",
+        "resultados",
+        "sin excepcion",
+        "sin diferencias",
+        "sin observaciones",
+    ],
+    "Riesgo": [
+        "riesgo",
+        "riesgos",
+    ],
+    "Propuesta de mejora": [
+        "propuesta",
+        "propuesta de mejora",
+        "recomendacion",
+        "recomendaciones",
+        "mejora",
+    ],
+    "Objetivo": [
+        "objetivo",
+        "objetivos",
+    ],
+    "Alcance": [
+        "alcance",
+    ],
+    "Tarea realizada": [
+        "tarea",
+        "tareas",
+        "tarea realizada",
+        "tareas realizadas",
+        "procedimiento realizado",
+        "procedimientos realizados",
+        "trabajo realizado",
+    ],
+    "Incumplimiento": [
+        "incumplimiento",
+        "incumplimientos",
+    ],
+    "Pendiente": [
+        "pendiente",
+        "pendientes",
+    ],
+    "Acción": [
+        "accion",
+        "acciones",
+        "plan de accion",
+    ],
+    "Comentario": [
+        "comentario",
+        "comentarios",
+    ],
+}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def normalize_text(value):
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+
+    text = unicodedata.normalize(
+        "NFD",
+        text
+    )
+
+    text = "".join(
+        char
+        for char in text
+        if unicodedata.category(char) != "Mn"
+    )
+
+    text = text.lower()
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
 
 
 def clean_text(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    if value is None:
+        return ""
 
+    text = str(value)
 
-def add_fact(facts, description, value, source, reference, kind="fact"):
-    facts.append({
-        "id": len(facts) + 1,
-        "description": clean_text(description),
-        "value": clean_text(value),
-        "source": clean_text(source),
-        "reference": clean_text(reference),
-        "status": "pending",
-        "kind": kind,
-    })
-
-
-def read_csv_bytes(raw):
-    last_error = None
-    for encoding in ("utf-8-sig", "utf-8", "latin1"):
-        try:
-            return pd.read_csv(BytesIO(raw), low_memory=False, encoding=encoding)
-        except Exception as exc:
-            last_error = exc
-    raise last_error
-
-
-def numeric_series(series):
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce")
-
-    txt = (
-        series.astype(str)
-        .str.strip()
-        .str.replace(r"[^0-9,.\-()]", "", regex=True)
-        .str.replace("(", "-", regex=False)
-        .str.replace(")", "", regex=False)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
     )
 
-    def parse_one(v):
-        if v in ("", "-", ".", ",", "nan", "None"):
-            return None
-        try:
-            if "," in v and "." in v:
-                if v.rfind(",") > v.rfind("."):
-                    v = v.replace(".", "").replace(",", ".")
-                else:
-                    v = v.replace(",", "")
-            elif "," in v:
-                parts = v.split(",")
-                if len(parts[-1]) in (1, 2):
-                    v = v.replace(".", "").replace(",", ".")
-                else:
-                    v = v.replace(",", "")
-            return float(v)
-        except Exception:
-            return None
-
-    return txt.map(parse_one)
+    return text.strip()
 
 
-def dataframe_facts(df, filename, reference, facts):
-    add_fact(
-        facts,
-        "Cantidad de registros identificados",
-        f"{len(df):,}".replace(",", "."),
-        filename,
-        reference,
-        "structure",
+def get_extension(filename):
+    if "." not in filename:
+        return ""
+
+    return filename.rsplit(
+        ".",
+        1
+    )[-1].lower()
+
+
+def detect_categories(text):
+    normalized = normalize_text(text)
+
+    matches = []
+
+    for category, keywords in KEYWORD_GROUPS.items():
+        for keyword in keywords:
+
+            normalized_keyword = normalize_text(
+                keyword
+            )
+
+            if normalized_keyword in normalized:
+
+                matches.append({
+                    "category": category,
+                    "keyword": keyword
+                })
+
+                break
+
+    return matches
+
+
+def make_item(
+    category,
+    text,
+    filename,
+    origin_type,
+    origin_name="",
+    reference="",
+    keyword=""
+):
+    return {
+        "id": str(uuid.uuid4()),
+        "category": category,
+        "text": clean_text(text),
+        "filename": filename,
+        "originType": origin_type,
+        "originName": origin_name,
+        "reference": reference,
+        "keyword": keyword,
+        "included": False,
+        "converted": False,
+    }
+
+
+def add_unique_item(items, seen, item):
+    fingerprint = (
+        item["filename"],
+        item["originName"],
+        item["category"],
+        normalize_text(item["text"])
     )
 
-    add_fact(
-        facts,
-        "Columnas identificadas",
-        ", ".join(str(c) for c in df.columns),
-        filename,
-        reference,
-        "structure",
-    )
-
-    duplicates = int(df.duplicated().sum())
-    if duplicates:
-        add_fact(
-            facts,
-            "Filas completamente duplicadas",
-            str(duplicates),
-            filename,
-            reference,
-            "quality",
-        )
-
-    missing = int(df.isna().sum().sum())
-    if missing:
-        add_fact(
-            facts,
-            "Celdas vacías identificadas",
-            str(missing),
-            filename,
-            reference,
-            "quality",
-        )
-
-    amount_added = 0
-
-    for col in df.columns:
-        col_text = str(col).strip()
-        low = col_text.lower()
-
-        if amount_added < 8 and any(k in low for k in MONEY_KEYWORDS):
-            nums = numeric_series(df[col])
-            valid = int(nums.notna().sum())
-
-            if len(df) and valid / max(len(df), 1) >= 0.60 and valid:
-                total = float(nums.fillna(0).sum())
-                add_fact(
-                    facts,
-                    f"Total de la columna '{col_text}'",
-                    f"{total:,.2f}",
-                    filename,
-                    reference,
-                    "numeric",
-                )
-                amount_added += 1
-
-        if any(k in low for k in DATE_KEYWORDS):
-            dates = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
-            valid_dates = int(dates.notna().sum())
-
-            if len(df) and valid_dates / max(len(df), 1) >= 0.60 and valid_dates:
-                add_fact(
-                    facts,
-                    f"Rango de fechas de la columna '{col_text}'",
-                    f"{dates.min().date().isoformat()} a {dates.max().date().isoformat()}",
-                    filename,
-                    reference,
-                    "date",
-                )
-
-
-def spreadsheet_facts(raw, filename, ext, facts):
-    if ext == "csv":
-        df = read_csv_bytes(raw)
-        dataframe_facts(df, filename, filename, facts)
+    if fingerprint in seen:
         return
 
-    engine = "xlrd" if ext == "xls" else "openpyxl"
-    excel = pd.ExcelFile(BytesIO(raw), engine=engine)
+    seen.add(fingerprint)
+    items.append(item)
 
-    add_fact(
-        facts,
-        "Hojas identificadas en el archivo",
-        ", ".join(excel.sheet_names),
-        filename,
-        filename,
-        "structure",
-    )
 
-    for sheet in excel.sheet_names[:12]:
-        df = pd.read_excel(excel, sheet_name=sheet)
-        dataframe_facts(
-            df,
-            filename,
-            f"{filename} | Hoja: {sheet}",
-            facts,
+def row_to_text(values):
+    parts = []
+
+    for value in values:
+        text = clean_text(value)
+
+        if text:
+            parts.append(text)
+
+    return " | ".join(parts)
+
+
+# ============================================================
+# EXCEL XLSX
+# ============================================================
+
+def extract_xlsx(uploaded_file, filename):
+    items = []
+    seen = set()
+
+    with NamedTemporaryFile(
+        suffix=".xlsx",
+        delete=False
+    ) as temp_file:
+
+        temp_path = temp_file.name
+
+        while True:
+            chunk = uploaded_file.stream.read(
+                1024 * 1024
+            )
+
+            if not chunk:
+                break
+
+            temp_file.write(chunk)
+
+    workbook = None
+
+    try:
+        workbook = load_workbook(
+            temp_path,
+            read_only=True,
+            data_only=True
         )
 
+        for worksheet in workbook.worksheets:
 
-def text_blocks(text, size=1600, limit=5):
-    text = clean_text(text)
-    if not text:
-        return []
+            sheet_name = worksheet.title
 
-    blocks = []
-    pos = 0
+            # ------------------------------------------------
+            # También revisamos el nombre de la solapa
+            # ------------------------------------------------
 
-    while pos < len(text) and len(blocks) < limit:
-        end = min(pos + size, len(text))
+            sheet_matches = detect_categories(
+                sheet_name
+            )
 
-        if end < len(text):
-            cut = text.rfind(". ", pos, end)
-            if cut > pos + 300:
-                end = cut + 1
+            rows_detected = 0
 
-        blocks.append(text[pos:end].strip())
-        pos = end
+            for row_number, row in enumerate(
+                worksheet.iter_rows(
+                    values_only=True
+                ),
+                start=1
+            ):
 
-    return [b for b in blocks if b]
+                row_text = row_to_text(row)
 
+                if not row_text:
+                    continue
 
-def docx_facts(raw, filename, facts):
-    doc = Document(BytesIO(raw))
-    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                matches = detect_categories(
+                    row_text
+                )
 
-    add_fact(
-        facts,
-        "Párrafos con contenido identificados",
-        str(len(paragraphs)),
-        filename,
-        filename,
-        "structure",
-    )
+                if not matches and sheet_matches:
+                    matches = sheet_matches
 
-    if doc.tables:
-        add_fact(
-            facts,
-            "Tablas identificadas",
-            str(len(doc.tables)),
-            filename,
-            filename,
-            "structure",
-        )
+                if not matches:
+                    continue
 
-    text = "\n".join(paragraphs)
+                for match in matches:
 
-    for i, block in enumerate(text_blocks(text), start=1):
-        add_fact(
-            facts,
-            f"Extracto textual identificado {i}",
-            block,
-            filename,
-            f"{filename} | Texto extraído",
-            "text",
-        )
+                    item = make_item(
+                        category=match["category"],
+                        text=row_text,
+                        filename=filename,
+                        origin_type="Excel",
+                        origin_name=sheet_name,
+                        reference=f"Fila {row_number}",
+                        keyword=match["keyword"]
+                    )
 
+                    add_unique_item(
+                        items,
+                        seen,
+                        item
+                    )
 
-def pdf_facts(raw, filename, facts):
-    reader = PdfReader(BytesIO(raw))
+                rows_detected += 1
 
-    add_fact(
-        facts,
-        "Cantidad de páginas identificadas",
-        str(len(reader.pages)),
-        filename,
-        filename,
-        "structure",
-    )
+                # Evita respuestas inmanejables cuando una
+                # solapa completa está titulada "Hallazgos".
+                if rows_detected >= 150:
+                    break
 
-    extracted = []
+    finally:
 
-    for page_no, page in enumerate(reader.pages[:20], start=1):
+        if workbook:
+            workbook.close()
+
         try:
-            txt = clean_text(page.extract_text() or "")
+            os.remove(temp_path)
         except Exception:
-            txt = ""
+            pass
 
-        if txt:
-            extracted.append((page_no, txt))
+    return items
 
-    if not extracted:
-        add_fact(
-            facts,
-            "Resultado de extracción de texto",
-            "No se pudo extraer texto del PDF. Puede tratarse de un documento escaneado.",
-            filename,
-            filename,
-            "warning",
+
+# ============================================================
+# CSV
+# ============================================================
+
+def extract_csv(uploaded_file, filename):
+    items = []
+    seen = set()
+
+    raw = uploaded_file.read()
+
+    encoding = "utf-8-sig"
+
+    try:
+        text = raw.decode(
+            encoding
         )
-        return
-
-    for page_no, txt in extracted[:5]:
-        add_fact(
-            facts,
-            f"Extracto textual identificado - página {page_no}",
-            txt[:1800],
-            filename,
-            f"{filename} | Página {page_no}",
-            "text",
+    except Exception:
+        text = raw.decode(
+            "latin1",
+            errors="replace"
         )
 
+    stream = StringIO(text)
 
-def txt_facts(raw, filename, facts):
+    sample = text[:5000]
+
+    try:
+        dialect = csv.Sniffer().sniff(
+            sample,
+            delimiters=",;\t|"
+        )
+    except Exception:
+        dialect = csv.excel
+
+    reader = csv.reader(
+        stream,
+        dialect
+    )
+
+    for row_number, row in enumerate(
+        reader,
+        start=1
+    ):
+
+        row_text = row_to_text(row)
+
+        if not row_text:
+            continue
+
+        matches = detect_categories(
+            row_text
+        )
+
+        for match in matches:
+
+            item = make_item(
+                category=match["category"],
+                text=row_text,
+                filename=filename,
+                origin_type="CSV",
+                origin_name="CSV",
+                reference=f"Fila {row_number}",
+                keyword=match["keyword"]
+            )
+
+            add_unique_item(
+                items,
+                seen,
+                item
+            )
+
+    return items
+
+
+# ============================================================
+# WORD
+# ============================================================
+
+def extract_docx(uploaded_file, filename):
+    items = []
+    seen = set()
+
+    document = Document(
+        BytesIO(
+            uploaded_file.read()
+        )
+    )
+
+    # --------------------------------------------------------
+    # PÁRRAFOS
+    # --------------------------------------------------------
+
+    for paragraph_number, paragraph in enumerate(
+        document.paragraphs,
+        start=1
+    ):
+
+        text = clean_text(
+            paragraph.text
+        )
+
+        if not text:
+            continue
+
+        matches = detect_categories(
+            text
+        )
+
+        for match in matches:
+
+            item = make_item(
+                category=match["category"],
+                text=text,
+                filename=filename,
+                origin_type="Word",
+                origin_name="Documento",
+                reference=f"Párrafo {paragraph_number}",
+                keyword=match["keyword"]
+            )
+
+            add_unique_item(
+                items,
+                seen,
+                item
+            )
+
+    # --------------------------------------------------------
+    # TABLAS
+    # --------------------------------------------------------
+
+    for table_number, table in enumerate(
+        document.tables,
+        start=1
+    ):
+
+        for row_number, row in enumerate(
+            table.rows,
+            start=1
+        ):
+
+            values = [
+                cell.text
+                for cell in row.cells
+            ]
+
+            row_text = row_to_text(
+                values
+            )
+
+            if not row_text:
+                continue
+
+            matches = detect_categories(
+                row_text
+            )
+
+            for match in matches:
+
+                item = make_item(
+                    category=match["category"],
+                    text=row_text,
+                    filename=filename,
+                    origin_type="Word",
+                    origin_name=f"Tabla {table_number}",
+                    reference=f"Fila {row_number}",
+                    keyword=match["keyword"]
+                )
+
+                add_unique_item(
+                    items,
+                    seen,
+                    item
+                )
+
+    return items
+
+
+# ============================================================
+# PDF
+# ============================================================
+
+def extract_pdf(uploaded_file, filename):
+    items = []
+    seen = set()
+
+    reader = PdfReader(
+        BytesIO(
+            uploaded_file.read()
+        )
+    )
+
+    pages_with_text = 0
+
+    for page_number, page in enumerate(
+        reader.pages,
+        start=1
+    ):
+
+        try:
+            page_text = page.extract_text() or ""
+        except Exception:
+            page_text = ""
+
+        if not page_text.strip():
+            continue
+
+        pages_with_text += 1
+
+        lines = [
+            clean_text(line)
+            for line in page_text.splitlines()
+            if clean_text(line)
+        ]
+
+        # ----------------------------------------------------
+        # Revisamos bloques de líneas para conservar contexto
+        # ----------------------------------------------------
+
+        for index, line in enumerate(lines):
+
+            matches = detect_categories(
+                line
+            )
+
+            if not matches:
+                continue
+
+            start = max(
+                0,
+                index - 1
+            )
+
+            end = min(
+                len(lines),
+                index + 3
+            )
+
+            context = " ".join(
+                lines[start:end]
+            )
+
+            for match in matches:
+
+                item = make_item(
+                    category=match["category"],
+                    text=context,
+                    filename=filename,
+                    origin_type="PDF",
+                    origin_name=f"Página {page_number}",
+                    reference=f"Página {page_number}",
+                    keyword=match["keyword"]
+                )
+
+                add_unique_item(
+                    items,
+                    seen,
+                    item
+                )
+
+    if pages_with_text == 0:
+
+        items.append(
+            make_item(
+                category="Advertencia",
+                text=(
+                    "No se pudo extraer texto del PDF. "
+                    "El documento puede estar escaneado."
+                ),
+                filename=filename,
+                origin_type="PDF",
+                origin_name="Documento",
+                reference="",
+                keyword=""
+            )
+        )
+
+    return items
+
+
+# ============================================================
+# TXT
+# ============================================================
+
+def extract_txt(uploaded_file, filename):
+    items = []
+    seen = set()
+
+    raw = uploaded_file.read()
+
     text = None
 
-    for encoding in ("utf-8-sig", "utf-8", "latin1"):
+    for encoding in (
+        "utf-8-sig",
+        "utf-8",
+        "latin1"
+    ):
+
         try:
-            text = raw.decode(encoding)
+            text = raw.decode(
+                encoding
+            )
             break
         except Exception:
             pass
 
     if text is None:
-        raise ValueError("No se pudo decodificar el archivo de texto.")
+        return items
 
-    for i, block in enumerate(text_blocks(text), start=1):
-        add_fact(
-            facts,
-            f"Extracto textual identificado {i}",
-            block,
-            filename,
-            filename,
-            "text",
+    lines = [
+        clean_text(line)
+        for line in text.splitlines()
+        if clean_text(line)
+    ]
+
+    for line_number, line in enumerate(
+        lines,
+        start=1
+    ):
+
+        matches = detect_categories(
+            line
         )
 
+        for match in matches:
+
+            item = make_item(
+                category=match["category"],
+                text=line,
+                filename=filename,
+                origin_type="TXT",
+                origin_name="Documento",
+                reference=f"Línea {line_number}",
+                keyword=match["keyword"]
+            )
+
+            add_unique_item(
+                items,
+                seen,
+                item
+            )
+
+    return items
+
+
+# ============================================================
+# FREE TEXT
+# ============================================================
+
+def extract_free_text(text):
+    items = []
+    seen = set()
+
+    lines = [
+        clean_text(line)
+        for line in text.splitlines()
+        if clean_text(line)
+    ]
+
+    for line_number, line in enumerate(
+        lines,
+        start=1
+    ):
+
+        matches = detect_categories(
+            line
+        )
+
+        if not matches:
+            continue
+
+        for match in matches:
+
+            item = make_item(
+                category=match["category"],
+                text=line,
+                filename="Texto ingresado",
+                origin_type="Texto",
+                origin_name="Ingreso manual",
+                reference=f"Línea {line_number}",
+                keyword=match["keyword"]
+            )
+
+            add_unique_item(
+                items,
+                seen,
+                item
+            )
+
+    return items
+
+
+# ============================================================
+# ROUTES
+# ============================================================
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html"
+    )
 
 
-@app.route("/analyze", methods=["POST"])
-def analyze_documents():
-    files = request.files.getlist("files")
-    free_text = request.form.get("freeText", "").strip()
+@app.route(
+    "/extract",
+    methods=["POST"]
+)
+def extract_information():
+
+    files = request.files.getlist(
+        "files"
+    )
+
+    free_text = request.form.get(
+        "freeText",
+        ""
+    ).strip()
 
     if not files and not free_text:
-        return jsonify(error="Cargue al menos un archivo o texto libre."), 400
 
-    facts = []
+        return jsonify({
+            "error": (
+                "Cargá al menos un papel de trabajo "
+                "o ingresá texto adicional."
+            )
+        }), 400
+
+    extracted_items = []
     errors = []
 
-    for uploaded in files:
-        filename = uploaded.filename or "archivo_sin_nombre"
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    for uploaded_file in files:
 
-        if ext not in ALLOWED_EXTENSIONS:
-            errors.append(f"{filename}: formato no admitido.")
+        filename = (
+            uploaded_file.filename
+            or "archivo_sin_nombre"
+        )
+
+        extension = get_extension(
+            filename
+        )
+
+        if extension not in ALLOWED_EXTENSIONS:
+
+            errors.append(
+                f"{filename}: formato no admitido."
+            )
+
             continue
 
         try:
-            raw = uploaded.read()
 
-            if ext in {"xlsx", "xls", "csv"}:
-                spreadsheet_facts(raw, filename, ext, facts)
-            elif ext == "docx":
-                docx_facts(raw, filename, facts)
-            elif ext == "pdf":
-                pdf_facts(raw, filename, facts)
-            elif ext == "txt":
-                txt_facts(raw, filename, facts)
+            if extension == "xlsx":
+
+                extracted_items.extend(
+                    extract_xlsx(
+                        uploaded_file,
+                        filename
+                    )
+                )
+
+            elif extension == "csv":
+
+                extracted_items.extend(
+                    extract_csv(
+                        uploaded_file,
+                        filename
+                    )
+                )
+
+            elif extension == "docx":
+
+                extracted_items.extend(
+                    extract_docx(
+                        uploaded_file,
+                        filename
+                    )
+                )
+
+            elif extension == "pdf":
+
+                extracted_items.extend(
+                    extract_pdf(
+                        uploaded_file,
+                        filename
+                    )
+                )
+
+            elif extension == "txt":
+
+                extracted_items.extend(
+                    extract_txt(
+                        uploaded_file,
+                        filename
+                    )
+                )
+
+            elif extension == "xls":
+
+                errors.append(
+                    f"{filename}: el formato XLS antiguo "
+                    "debe convertirse a XLSX para conservar "
+                    "la lectura eficiente por solapas."
+                )
 
         except Exception as exc:
-            errors.append(f"{filename}: {str(exc)}")
+
+            errors.append(
+                f"{filename}: {str(exc)}"
+            )
 
     if free_text:
-        for i, block in enumerate(text_blocks(free_text), start=1):
-            add_fact(
-                facts,
-                f"Texto libre aportado por el auditor {i}",
-                block,
-                "Texto libre",
-                "Ingreso manual",
-                "text",
+
+        extracted_items.extend(
+            extract_free_text(
+                free_text
             )
-
-    message = (
-        f"Se extrajeron {len(facts)} elementos objetivos de la documentación. "
-        "Revise cada uno antes de aceptarlo."
-        if facts
-        else "No se identificaron hechos verificables en la documentación cargada."
-    )
-
-    return jsonify({
-        "facts": facts,
-        "message": message,
-        "errors": errors,
-    })
-
-
-@app.route("/generate-memo", methods=["POST"])
-def generate_memo():
-    data = request.get_json(silent=True) or {}
-    audit_data = data.get("auditData", {})
-    validated_facts = data.get("validatedFacts", [])
-    tasks = data.get("tasks", [])
-    results = data.get("results", [])
-    findings = data.get("findings", [])
-    style = data.get("style", "ejecutivo")
-
-    if not validated_facts:
-        return jsonify(error="Debe existir al menos un hecho validado por el auditor."), 400
-
-    memo = {
-        "header": {
-            "titulo": audit_data.get("titulo", "Auditoría"),
-            "analisis": audit_data.get("analisis", ""),
-            "sector": audit_data.get("sector", ""),
-            "proceso": audit_data.get("proceso", ""),
-            "periodo": audit_data.get("periodo", ""),
-            "alcance": audit_data.get("alcance", ""),
-            "auditor": audit_data.get("auditor", ""),
-            "fecha": audit_data.get("fecha", datetime.now().strftime("%d/%m/%Y")),
-        },
-        "objetivos": audit_data.get("objetivos", []),
-        "fuentes": audit_data.get("fuentes", []),
-        "hechos_validados": validated_facts,
-        "tareas": tasks,
-        "resultados": results,
-        "hallazgos": findings,
-        "estilo": style,
-        "conclusiones": (
-            f"Se registraron {len(findings)} hallazgo(s) en el trabajo. "
-            "La conclusión final debe ser revisada y completada por el auditor "
-            "sobre la base de los hechos aceptados y la evidencia disponible."
-        ),
-    }
-
-    return jsonify({
-        "memo": memo,
-        "message": "Borrador de memo generado con la información validada.",
-    })
-
-
-def autosize_sheet(ws, max_width=55):
-    for column_cells in ws.columns:
-        length = 0
-        letter = column_cells[0].column_letter
-
-        for cell in column_cells:
-            value = "" if cell.value is None else str(cell.value)
-            length = max(length, min(len(value), max_width))
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-        ws.column_dimensions[letter].width = max(12, min(length + 2, max_width))
-
-
-@app.route("/export-excel", methods=["POST"])
-def export_excel():
-    data = request.get_json(silent=True) or {}
-    memo_data = data.get("memo", {})
-    output = BytesIO()
-
-    blue_dark = "17365D"
-    blue_light = "EAF2F8"
-    white = "FFFFFF"
-    thin = Side(style="thin", color="D9E1E8")
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        header = memo_data.get("header", {})
-
-        memo_rows = [
-            ["TÍTULO", header.get("titulo", "")],
-            ["ANÁLISIS", header.get("analisis", "")],
-            ["SECTOR", header.get("sector", "")],
-            ["PROCESO", header.get("proceso", "")],
-            ["PERÍODO", header.get("periodo", "")],
-            ["ALCANCE", header.get("alcance", "")],
-            ["AUDITOR", header.get("auditor", "")],
-            ["FECHA", header.get("fecha", "")],
-            ["OBJETIVOS", "\n".join(f"{i+1}. {x}" for i, x in enumerate(memo_data.get("objetivos", [])))],
-            ["CONCLUSIONES", memo_data.get("conclusiones", "")],
-        ]
-
-        pd.DataFrame(memo_rows, columns=["Campo", "Valor"]).to_excel(
-            writer, sheet_name="MEMO", index=False
         )
 
-        findings = memo_data.get("hallazgos", [])
-        finding_fields = [
-            "titulo", "descripcion", "condicion", "area_responsable",
-            "responsable_plan", "criticidad", "estado", "fecha_objetivo",
-            "riesgo", "propuesta_mejora", "fundamento_cuantitativo",
-            "fuente", "evidencia", "referencia", "seguimiento"
+    return jsonify({
+        "items": extracted_items,
+        "count": len(extracted_items),
+        "errors": errors,
+        "message": (
+            f"Se identificaron {len(extracted_items)} "
+            "elementos potencialmente relevantes. "
+            "Revisalos antes de incorporarlos al memo."
+        )
+    })
+
+
+# Alias para evitar problemas si queda alguna llamada vieja.
+@app.route(
+    "/analyze",
+    methods=["POST"]
+)
+def analyze_alias():
+    return extract_information()
+
+
+# ============================================================
+# EXPORTAR EXCEL
+# ============================================================
+
+def format_header(cell):
+    cell.fill = PatternFill(
+        "solid",
+        fgColor="17365D"
+    )
+
+    cell.font = Font(
+        color="FFFFFF",
+        bold=True
+    )
+
+    cell.alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+
+def auto_width(worksheet):
+    for column in worksheet.columns:
+
+        max_length = 0
+
+        column_letter = get_column_letter(
+            column[0].column
+        )
+
+        for cell in column:
+
+            cell.alignment = Alignment(
+                vertical="top",
+                wrap_text=True
+            )
+
+            if cell.value is None:
+                continue
+
+            length = len(
+                str(cell.value)
+            )
+
+            max_length = max(
+                max_length,
+                min(
+                    length,
+                    70
+                )
+            )
+
+        worksheet.column_dimensions[
+            column_letter
+        ].width = max(
+            12,
+            min(
+                max_length + 2,
+                70
+            )
+        )
+
+
+@app.route(
+    "/export-excel",
+    methods=["POST"]
+)
+def export_excel():
+
+    payload = request.get_json(
+        silent=True
+    ) or {}
+
+    memo = payload.get(
+        "memo",
+        {}
+    )
+
+    general = memo.get(
+        "general",
+        {}
+    )
+
+    findings = memo.get(
+        "findings",
+        []
+    )
+
+    sources = memo.get(
+        "sources",
+        []
+    )
+
+    extracted = memo.get(
+        "extracted",
+        []
+    )
+
+    workbook = Workbook()
+
+    # ========================================================
+    # MEMO
+    # ========================================================
+
+    ws = workbook.active
+    ws.title = "Memo"
+
+    ws.merge_cells(
+        "A1:F1"
+    )
+
+    ws["A1"] = "AUDITORÍA INTERNA"
+
+    ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="17365D"
+    )
+
+    ws["A1"].font = Font(
+        color="FFFFFF",
+        bold=True,
+        size=14
+    )
+
+    ws["A1"].alignment = Alignment(
+        horizontal="center"
+    )
+
+    row = 3
+
+    general_rows = [
+        ("Auditoría", general.get("title", "")),
+        ("Área", general.get("area", "")),
+        ("Proceso", general.get("process", "")),
+        ("Período", general.get("period", "")),
+        ("Auditor", general.get("auditor", "")),
+        ("Objetivo", general.get("objective", "")),
+        ("Alcance", general.get("scope", "")),
+    ]
+
+    for label, value in general_rows:
+
+        ws.cell(
+            row=row,
+            column=1,
+            value=label
+        )
+
+        ws.cell(
+            row=row,
+            column=1
+        ).font = Font(
+            bold=True,
+            color="17365D"
+        )
+
+        ws.merge_cells(
+            start_row=row,
+            start_column=2,
+            end_row=row,
+            end_column=6
+        )
+
+        ws.cell(
+            row=row,
+            column=2,
+            value=value
+        )
+
+        row += 1
+
+    row += 1
+
+    for index, finding in enumerate(
+        findings,
+        start=1
+    ):
+
+        ws.merge_cells(
+            start_row=row,
+            start_column=1,
+            end_row=row,
+            end_column=6
+        )
+
+        ws.cell(
+            row=row,
+            column=1,
+            value=(
+                f"HALLAZGO {index:02d} - "
+                f"{finding.get('title', '')}"
+            )
+        )
+
+        ws.cell(
+            row=row,
+            column=1
+        ).fill = PatternFill(
+            "solid",
+            fgColor="EAF2F8"
+        )
+
+        ws.cell(
+            row=row,
+            column=1
+        ).font = Font(
+            bold=True,
+            color="17365D"
+        )
+
+        row += 1
+
+        details = [
+            (
+                "Situación observada",
+                finding.get(
+                    "situation",
+                    ""
+                )
+            ),
+            (
+                "Riesgo",
+                finding.get(
+                    "risk",
+                    ""
+                )
+            ),
+            (
+                "Propuesta de mejora",
+                finding.get(
+                    "proposal",
+                    ""
+                )
+            ),
+            (
+                "Área responsable",
+                finding.get(
+                    "responsibleArea",
+                    ""
+                )
+            ),
+            (
+                "Criticidad",
+                finding.get(
+                    "severity",
+                    ""
+                )
+            ),
+            (
+                "Estado",
+                finding.get(
+                    "status",
+                    ""
+                )
+            ),
+            (
+                "Fecha compromiso",
+                finding.get(
+                    "targetDate",
+                    ""
+                )
+            ),
+            (
+                "Archivo de origen",
+                finding.get(
+                    "sourceFile",
+                    ""
+                )
+            ),
+            (
+                "Solapa / origen",
+                finding.get(
+                    "sourceLocation",
+                    ""
+                )
+            ),
         ]
 
-        if findings:
-            pd.DataFrame([
-                {field: h.get(field, "") for field in finding_fields}
-                for h in findings
-            ]).to_excel(writer, sheet_name="Hallazgos", index=False)
-        else:
-            pd.DataFrame({"Mensaje": ["No hay hallazgos"]}).to_excel(
-                writer, sheet_name="Hallazgos", index=False
+        for label, value in details:
+
+            ws.cell(
+                row=row,
+                column=1,
+                value=label
             )
 
-        results = memo_data.get("resultados", [])
-        if results:
-            pd.DataFrame(results).drop(columns=["id"], errors="ignore").to_excel(
-                writer, sheet_name="Resultados", index=False
-            )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay resultados"]}).to_excel(
-                writer, sheet_name="Resultados", index=False
+            ws.cell(
+                row=row,
+                column=1
+            ).font = Font(
+                bold=True
             )
 
-        sources = memo_data.get("fuentes", [])
-        if sources:
-            source_rows = []
-            for src in sources:
-                if isinstance(src, dict):
-                    source_rows.append({
-                        "Nombre": src.get("name", ""),
-                        "Tipo": src.get("type", ""),
-                        "Referencia": src.get("reference", ""),
-                        "Descripción": src.get("description", ""),
-                    })
-                else:
-                    source_rows.append({
-                        "Nombre": str(src),
-                        "Tipo": "",
-                        "Referencia": "",
-                        "Descripción": "",
-                    })
-
-            pd.DataFrame(source_rows).to_excel(
-                writer, sheet_name="Fuentes", index=False
-            )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay fuentes"]}).to_excel(
-                writer, sheet_name="Fuentes", index=False
+            ws.merge_cells(
+                start_row=row,
+                start_column=2,
+                end_row=row,
+                end_column=6
             )
 
-        facts = memo_data.get("hechos_validados", [])
-        if facts:
-            pd.DataFrame([{
-                "Descripción": h.get("description", ""),
-                "Valor": h.get("value", ""),
-                "Fuente": h.get("source", ""),
-                "Referencia": h.get("reference", ""),
-                "Tipo": h.get("kind", ""),
-            } for h in facts]).to_excel(
-                writer, sheet_name="Trazabilidad", index=False
-            )
-        else:
-            pd.DataFrame({"Mensaje": ["No hay hechos"]}).to_excel(
-                writer, sheet_name="Trazabilidad", index=False
+            ws.cell(
+                row=row,
+                column=2,
+                value=value
             )
 
-        wb = writer.book
+            row += 1
 
-        for ws in wb.worksheets:
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
+        row += 2
 
-            for cell in ws[1]:
-                cell.fill = PatternFill("solid", fgColor=blue_dark)
-                cell.font = Font(color=white, bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = Border(bottom=thin)
+    auto_width(ws)
 
-            autosize_sheet(ws)
+    # ========================================================
+    # HALLAZGOS
+    # ========================================================
 
-        memo_ws = wb["MEMO"]
+    ws_findings = workbook.create_sheet(
+        "Hallazgos"
+    )
 
-        for row in memo_ws.iter_rows(min_row=2):
-            row[0].fill = PatternFill("solid", fgColor=blue_light)
-            row[0].font = Font(color=blue_dark, bold=True)
+    finding_headers = [
+        "N°",
+        "Título",
+        "Situación observada",
+        "Riesgo",
+        "Propuesta de mejora",
+        "Área responsable",
+        "Responsable plan",
+        "Criticidad",
+        "Estado",
+        "Fecha compromiso",
+        "Base cuantitativa",
+        "Archivo origen",
+        "Solapa / origen",
+        "Evidencia / referencia",
+        "Ticket",
+        "Seguimiento",
+    ]
 
-            for cell in row:
-                cell.border = Border(bottom=thin)
+    ws_findings.append(
+        finding_headers
+    )
+
+    for cell in ws_findings[1]:
+        format_header(cell)
+
+    for index, finding in enumerate(
+        findings,
+        start=1
+    ):
+
+        ws_findings.append([
+            index,
+            finding.get("title", ""),
+            finding.get("situation", ""),
+            finding.get("risk", ""),
+            finding.get("proposal", ""),
+            finding.get("responsibleArea", ""),
+            finding.get("actionOwner", ""),
+            finding.get("severity", ""),
+            finding.get("status", ""),
+            finding.get("targetDate", ""),
+            finding.get("quantitativeBasis", ""),
+            finding.get("sourceFile", ""),
+            finding.get("sourceLocation", ""),
+            finding.get("evidence", ""),
+            finding.get("ticket", ""),
+            finding.get("followUp", ""),
+        ])
+
+    ws_findings.freeze_panes = "A2"
+    auto_width(ws_findings)
+
+    # ========================================================
+    # FUENTES
+    # ========================================================
+
+    ws_sources = workbook.create_sheet(
+        "Fuentes"
+    )
+
+    ws_sources.append([
+        "Nombre",
+        "Tipo",
+        "Referencia",
+        "Descripción"
+    ])
+
+    for cell in ws_sources[1]:
+        format_header(cell)
+
+    for source in sources:
+
+        ws_sources.append([
+            source.get("name", ""),
+            source.get("type", ""),
+            source.get("reference", ""),
+            source.get("description", ""),
+        ])
+
+    auto_width(ws_sources)
+
+    # ========================================================
+    # TRAZABILIDAD
+    # ========================================================
+
+    ws_trace = workbook.create_sheet(
+        "Trazabilidad"
+    )
+
+    ws_trace.append([
+        "Tipo detectado",
+        "Contenido",
+        "Archivo",
+        "Origen / solapa",
+        "Referencia",
+        "Palabra clave",
+        "Incluido",
+    ])
+
+    for cell in ws_trace[1]:
+        format_header(cell)
+
+    for item in extracted:
+
+        ws_trace.append([
+            item.get("category", ""),
+            item.get("text", ""),
+            item.get("filename", ""),
+            item.get("originName", ""),
+            item.get("reference", ""),
+            item.get("keyword", ""),
+            "Sí" if item.get("included") else "No",
+        ])
+
+    auto_width(ws_trace)
+
+    # ========================================================
+    # GUARDAR
+    # ========================================================
+
+    output = BytesIO()
+
+    workbook.save(
+        output
+    )
 
     output.seek(0)
 
+    filename = (
+        "Audit_Memo_"
+        + datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+        + ".xlsx"
+    )
+
     return send_file(
         output,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name=f"audit_memo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        download_name=filename,
+        mimetype=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        )
     )
 
 
-@app.route("/improve-text", methods=["POST"])
-def improve_text():
-    data = request.get_json(silent=True) or {}
-    text = data.get("text", "")
-
-    return jsonify({
-        "original": text,
-        "improved": text,
-        "message": (
-            "La mejora automática de redacción todavía no tiene IA conectada. "
-            "El texto no fue modificado."
-        ),
-    })
-
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
