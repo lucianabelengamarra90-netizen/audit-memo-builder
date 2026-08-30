@@ -1,7 +1,9 @@
 from flask import Flask, render_template, request, jsonify, send_file
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+
 from docx import Document
 from pypdf import PdfReader
 from openai import OpenAI
@@ -9,7 +11,6 @@ from openai import OpenAI
 from io import BytesIO, StringIO
 from tempfile import NamedTemporaryFile
 from datetime import datetime
-
 from functools import lru_cache
 
 import csv
@@ -19,31 +20,21 @@ import sqlite3
 import unicodedata
 import uuid
 import zipfile
-
 import xml.etree.ElementTree as ET
 
 
+# ============================================================
+# APP
+# ============================================================
+
 app = Flask(__name__)
 
+# Máximo de archivo permitido: 250 MB
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 
 
 # ============================================================
-# OPENAI
-# ============================================================
-
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
-client = None
-
-if OPENAI_API_KEY:
-    client = OpenAI(
-        api_key=OPENAI_API_KEY
-    )
-
-
-# ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GENERAL
 # ============================================================
 
 ALLOWED_EXTENSIONS = {
@@ -54,6 +45,18 @@ ALLOWED_EXTENSIONS = {
     "txt",
 }
 
+
+# Máximo de elementos que devolvemos por solapa.
+# Evita llenar el navegador con miles de tarjetas.
+MAX_ITEMS_PER_SHEET = 250
+
+# Máximo de caracteres de una fila que usamos para análisis.
+MAX_ROW_TEXT_LENGTH = 6000
+
+
+# ============================================================
+# PALABRAS CLAVE DE AUDITORÍA
+# ============================================================
 
 KEYWORD_GROUPS = {
 
@@ -150,15 +153,24 @@ KEYWORD_GROUPS = {
 
 
 # ============================================================
-# HELPERS GENERALES
+# HELPERS DE TEXTO
 # ============================================================
 
 def normalize_text(value):
+    """
+    Normaliza texto para realizar búsquedas:
+    - convierte a minúsculas
+    - elimina acentos
+    - unifica espacios
+    """
 
     if value is None:
         return ""
 
     text = str(value).strip()
+
+    if not text:
+        return ""
 
     text = unicodedata.normalize(
         "NFD",
@@ -183,6 +195,9 @@ def normalize_text(value):
 
 
 def clean_text(value):
+    """
+    Limpia espacios sin alterar el contenido.
+    """
 
     if value is None:
         return ""
@@ -198,6 +213,61 @@ def clean_text(value):
     return text.strip()
 
 
+# ============================================================
+# PALABRAS CLAVE NORMALIZADAS
+#
+# IMPORTANTE:
+# Se calculan una sola vez al iniciar la aplicación.
+# Antes se normalizaban nuevamente por cada fila del Excel.
+# ============================================================
+
+NORMALIZED_KEYWORDS = {}
+
+for category, keywords in KEYWORD_GROUPS.items():
+
+    NORMALIZED_KEYWORDS[category] = [
+        (
+            normalize_text(keyword),
+            keyword
+        )
+        for keyword in keywords
+    ]
+
+
+def detect_categories(text):
+    """
+    Detecta categorías de auditoría dentro del texto.
+    """
+
+    if not text:
+        return []
+
+    normalized = normalize_text(text)
+
+    if not normalized:
+        return []
+
+    matches = []
+
+    for category, keywords in NORMALIZED_KEYWORDS.items():
+
+        for normalized_keyword, original_keyword in keywords:
+
+            if (
+                normalized_keyword
+                and normalized_keyword in normalized
+            ):
+
+                matches.append({
+                    "category": category,
+                    "keyword": original_keyword,
+                })
+
+                break
+
+    return matches
+
+
 def get_extension(filename):
 
     if "." not in filename:
@@ -209,33 +279,42 @@ def get_extension(filename):
     )[-1].lower()
 
 
-def detect_categories(text):
+def row_to_text(values):
 
-    normalized = normalize_text(
-        text
+    parts = []
+
+    for value in values:
+
+        text = clean_text(value)
+
+        if text:
+            parts.append(text)
+
+    text = " | ".join(parts)
+
+    if len(text) > MAX_ROW_TEXT_LENGTH:
+        text = text[:MAX_ROW_TEXT_LENGTH]
+
+    return text
+
+
+def contains_letters(text):
+    """
+    Evita ejecutar búsquedas sobre filas puramente numéricas.
+    """
+
+    if not text:
+        return False
+
+    return any(
+        char.isalpha()
+        for char in text
     )
 
-    matches = []
 
-    for category, keywords in KEYWORD_GROUPS.items():
-
-        for keyword in keywords:
-
-            normalized_keyword = normalize_text(
-                keyword
-            )
-
-            if normalized_keyword in normalized:
-
-                matches.append({
-                    "category": category,
-                    "keyword": keyword
-                })
-
-                break
-
-    return matches
-
+# ============================================================
+# ITEMS EXTRAÍDOS
+# ============================================================
 
 def make_item(
     category,
@@ -271,53 +350,49 @@ def add_unique_item(
         item["filename"],
         item["originName"],
         item["category"],
-        normalize_text(
-            item["text"]
-        )
+        normalize_text(item["text"]),
     )
 
     if fingerprint in seen:
         return False
 
-    seen.add(
-        fingerprint
-    )
+    seen.add(fingerprint)
 
-    items.append(
-        item
-    )
+    items.append(item)
 
     return True
 
 
-def row_to_text(values):
+# ============================================================
+# OPENAI
+# ============================================================
 
-    parts = []
+def get_openai_client():
+    """
+    Obtiene OPENAI_API_KEY en el momento en que se usa la IA.
 
-    for value in values:
+    Esto evita depender de que la variable haya quedado cargada
+    durante el import inicial de Flask/Gunicorn.
+    """
 
-        text = clean_text(
-            value
-        )
+    api_key = os.getenv(
+        "OPENAI_API_KEY",
+        ""
+    ).strip()
 
-        if text:
-            parts.append(
-                text
-            )
+    if not api_key:
+        return None
 
-    return " | ".join(
-        parts
+    return OpenAI(
+        api_key=api_key
     )
 
 
 # ============================================================
-# XLSX ULTRALIVIANO
+# XLSX - LECTOR DE BAJO CONSUMO
 #
-# No usamos openpyxl para leer el workbook.
-# XLSX es un ZIP con XML internos.
-#
-# Se recorren las hojas una por una y las filas mediante
-# iterparse para evitar cargar el workbook completo en RAM.
+# No usamos openpyxl para LEER archivos grandes.
+# Un XLSX es un ZIP compuesto por XML.
 # ============================================================
 
 MAIN_NS = (
@@ -330,26 +405,38 @@ REL_NS = (
     "officeDocument/2006/relationships"
 )
 
-PACKAGE_REL_NS = (
-    "http://schemas.openxmlformats.org/"
-    "package/2006/relationships"
-)
-
 
 def qname(namespace, tag):
     return f"{{{namespace}}}{tag}"
 
 
+# ============================================================
+# SHARED STRINGS
+# ============================================================
+
 def create_shared_strings_db(
     archive,
     db_path
 ):
+    """
+    Los textos de Excel pueden encontrarse en sharedStrings.xml.
 
-    connection = sqlite3.connect(
-        db_path
-    )
+    En archivos grandes esa tabla puede ocupar mucha memoria.
+    Por eso se guarda temporalmente en SQLite.
+    """
+
+    connection = sqlite3.connect(db_path)
 
     cursor = connection.cursor()
+
+    # SQLite temporal optimizado para velocidad.
+    cursor.execute(
+        "PRAGMA journal_mode=OFF"
+    )
+
+    cursor.execute(
+        "PRAGMA synchronous=OFF"
+    )
 
     cursor.execute(
         """
@@ -360,17 +447,17 @@ def create_shared_strings_db(
         """
     )
 
-    if "xl/sharedStrings.xml" not in archive.namelist():
+    archive_names = archive.namelist()
+
+    if "xl/sharedStrings.xml" not in archive_names:
 
         connection.commit()
 
         return connection
 
-
     index = 0
 
     batch = []
-
 
     with archive.open(
         "xl/sharedStrings.xml"
@@ -381,15 +468,13 @@ def create_shared_strings_db(
             events=("end",)
         )
 
-
-        for event, element in context:
+        for _, element in context:
 
             if element.tag != qname(
                 MAIN_NS,
                 "si"
             ):
                 continue
-
 
             parts = []
 
@@ -405,11 +490,7 @@ def create_shared_strings_db(
                         text_element.text
                     )
 
-
-            value = "".join(
-                parts
-            )
-
+            value = "".join(parts)
 
             batch.append(
                 (
@@ -418,11 +499,9 @@ def create_shared_strings_db(
                 )
             )
 
-
             index += 1
 
-
-            if len(batch) >= 5000:
+            if len(batch) >= 10000:
 
                 cursor.executemany(
                     """
@@ -435,11 +514,9 @@ def create_shared_strings_db(
 
                 connection.commit()
 
-                batch = []
-
+                batch.clear()
 
             element.clear()
-
 
     if batch:
 
@@ -452,15 +529,16 @@ def create_shared_strings_db(
             batch
         )
 
-
     connection.commit()
 
     return connection
 
 
-def get_workbook_sheet_paths(
-    archive
-):
+# ============================================================
+# SOLAPAS DEL WORKBOOK
+# ============================================================
+
+def get_workbook_sheet_paths(archive):
 
     workbook_root = ET.fromstring(
         archive.read(
@@ -468,16 +546,13 @@ def get_workbook_sheet_paths(
         )
     )
 
-
     relationships_root = ET.fromstring(
         archive.read(
             "xl/_rels/workbook.xml.rels"
         )
     )
 
-
     relationships = {}
-
 
     for relationship in relationships_root:
 
@@ -490,6 +565,8 @@ def get_workbook_sheet_paths(
             ""
         )
 
+        if not target:
+            continue
 
         if target.startswith("/"):
             target = target.lstrip("/")
@@ -497,14 +574,16 @@ def get_workbook_sheet_paths(
         elif not target.startswith("xl/"):
             target = "xl/" + target
 
+        # Normalizamos posibles ../
+        target = os.path.normpath(
+            target
+        ).replace("\\", "/")
 
         relationships[
             relationship_id
         ] = target
 
-
     sheets = []
-
 
     sheets_element = workbook_root.find(
         qname(
@@ -513,10 +592,12 @@ def get_workbook_sheet_paths(
         )
     )
 
-
     if sheets_element is None:
         return sheets
 
+    archive_names = set(
+        archive.namelist()
+    )
 
     for sheet in sheets_element:
 
@@ -525,7 +606,6 @@ def get_workbook_sheet_paths(
             "Sin nombre"
         )
 
-
         relationship_id = sheet.attrib.get(
             qname(
                 REL_NS,
@@ -533,30 +613,28 @@ def get_workbook_sheet_paths(
             )
         )
 
-
         sheet_path = relationships.get(
             relationship_id
         )
 
-
         if (
             sheet_path
-            and
-            sheet_path in archive.namelist()
+            and sheet_path in archive_names
         ):
 
             sheets.append({
                 "name": sheet_name,
-                "path": sheet_path
+                "path": sheet_path,
             })
-
 
     return sheets
 
 
-def extract_inline_string(
-    cell_element
-):
+# ============================================================
+# CELDAS XLSX
+# ============================================================
+
+def extract_inline_string(cell_element):
 
     inline_string = cell_element.find(
         qname(
@@ -565,13 +643,10 @@ def extract_inline_string(
         )
     )
 
-
     if inline_string is None:
         return ""
 
-
     parts = []
-
 
     for text_element in inline_string.iter(
         qname(
@@ -585,10 +660,7 @@ def extract_inline_string(
                 text_element.text
             )
 
-
-    return "".join(
-        parts
-    )
+    return "".join(parts)
 
 
 def extract_cell_value(
@@ -600,13 +672,11 @@ def extract_cell_value(
         "t"
     )
 
-
     if cell_type == "inlineStr":
 
         return extract_inline_string(
             cell_element
         )
-
 
     value_element = cell_element.find(
         qname(
@@ -615,18 +685,13 @@ def extract_cell_value(
         )
     )
 
-
     if (
         value_element is None
-        or
-        value_element.text is None
+        or value_element.text is None
     ):
-
         return ""
 
-
     raw_value = value_element.text
-
 
     if cell_type == "s":
 
@@ -640,7 +705,6 @@ def extract_cell_value(
 
             return ""
 
-
     if cell_type == "b":
 
         return (
@@ -649,9 +713,12 @@ def extract_cell_value(
             else "FALSE"
         )
 
-
     return raw_value
 
+
+# ============================================================
+# EXTRAER XLSX
+# ============================================================
 
 def extract_xlsx(
     uploaded_file,
@@ -664,49 +731,55 @@ def extract_xlsx(
 
     warnings = []
 
+    excel_path = None
 
-    with NamedTemporaryFile(
-        suffix=".xlsx",
-        delete=False
-    ) as temp_excel:
-
-        excel_path = temp_excel.name
-
-
-        while True:
-
-            chunk = uploaded_file.stream.read(
-                1024 * 1024
-            )
-
-
-            if not chunk:
-                break
-
-
-            temp_excel.write(
-                chunk
-            )
-
-
-    with NamedTemporaryFile(
-        suffix=".sqlite",
-        delete=False
-    ) as temp_db:
-
-        db_path = temp_db.name
-
+    db_path = None
 
     shared_connection = None
 
-
     try:
+
+        # ----------------------------------------------------
+        # Guardar upload en disco temporal
+        # ----------------------------------------------------
+
+        with NamedTemporaryFile(
+            suffix=".xlsx",
+            delete=False
+        ) as temp_excel:
+
+            excel_path = temp_excel.name
+
+            while True:
+
+                chunk = uploaded_file.stream.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                temp_excel.write(chunk)
+
+        # ----------------------------------------------------
+        # Base temporal para shared strings
+        # ----------------------------------------------------
+
+        with NamedTemporaryFile(
+            suffix=".sqlite",
+            delete=False
+        ) as temp_db:
+
+            db_path = temp_db.name
+
+        # ----------------------------------------------------
+        # Abrir XLSX
+        # ----------------------------------------------------
 
         with zipfile.ZipFile(
             excel_path,
             "r"
         ) as archive:
-
 
             shared_connection = (
                 create_shared_strings_db(
@@ -715,10 +788,7 @@ def extract_xlsx(
                 )
             )
 
-
-            @lru_cache(
-                maxsize=5000
-            )
+            @lru_cache(maxsize=10000)
             def get_shared_string(index):
 
                 row = shared_connection.execute(
@@ -730,18 +800,24 @@ def extract_xlsx(
                     (index,)
                 ).fetchone()
 
+                if row:
+                    return row[0]
 
-                return (
-                    row[0]
-                    if row
-                    else ""
-                )
-
+                return ""
 
             sheets = get_workbook_sheet_paths(
                 archive
             )
 
+            if not sheets:
+
+                warnings.append(
+                    f"{filename}: no se identificaron solapas legibles."
+                )
+
+            # ------------------------------------------------
+            # Recorrer solapas
+            # ------------------------------------------------
 
             for sheet in sheets:
 
@@ -749,47 +825,33 @@ def extract_xlsx(
 
                 sheet_path = sheet["path"]
 
-
-                sheet_matches = detect_categories(
-                    sheet_name
-                )
-
-
                 stored_in_sheet = 0
 
-                total_matches_in_sheet = 0
-
+                sheet_reached_limit = False
 
                 with archive.open(
                     sheet_path
                 ) as stream:
-
 
                     context = ET.iterparse(
                         stream,
                         events=("end",)
                     )
 
-
-                    for event, element in context:
-
+                    for _, element in context:
 
                         if element.tag != qname(
                             MAIN_NS,
                             "row"
                         ):
-
                             continue
-
 
                         row_number = element.attrib.get(
                             "r",
                             ""
                         )
 
-
                         values = []
-
 
                         for cell in element.findall(
                             qname(
@@ -803,20 +865,15 @@ def extract_xlsx(
                                 get_shared_string
                             )
 
-
-                            if clean_text(
-                                value
-                            ):
+                            if clean_text(value):
 
                                 values.append(
                                     value
                                 )
 
-
                         row_text = row_to_text(
                             values
                         )
-
 
                         if not row_text:
 
@@ -824,84 +881,86 @@ def extract_xlsx(
 
                             continue
 
+                        # Evitamos procesar filas puramente numéricas.
+                        if not contains_letters(
+                            row_text
+                        ):
+
+                            element.clear()
+
+                            continue
 
                         matches = detect_categories(
                             row_text
                         )
 
-
-                        if (
-                            not matches
-                            and
-                            sheet_matches
-                        ):
-
-                            matches = sheet_matches
-
-
                         if matches:
 
-                            total_matches_in_sheet += 1
+                            for match in matches:
 
+                                if (
+                                    stored_in_sheet
+                                    >= MAX_ITEMS_PER_SHEET
+                                ):
 
-                            # Guardamos un máximo razonable
-                            # por solapa para no devolver miles
-                            # de tarjetas al navegador.
-                            #
-                            # IMPORTANTE:
-                            # la solapa se sigue recorriendo
-                            # completa aunque se alcance el límite.
+                                    sheet_reached_limit = True
 
-                            if stored_in_sheet < 250:
+                                    break
 
+                                item = make_item(
+                                    category=match[
+                                        "category"
+                                    ],
+                                    text=row_text,
+                                    filename=filename,
+                                    origin_type="Excel",
+                                    origin_name=sheet_name,
+                                    reference=(
+                                        f"Fila {row_number}"
+                                        if row_number
+                                        else ""
+                                    ),
+                                    keyword=match[
+                                        "keyword"
+                                    ],
+                                )
 
-                                for match in matches:
+                                added = add_unique_item(
+                                    items,
+                                    seen,
+                                    item
+                                )
 
+                                if added:
 
-                                    item = make_item(
-                                        category=match[
-                                            "category"
-                                        ],
-                                        text=row_text,
-                                        filename=filename,
-                                        origin_type="Excel",
-                                        origin_name=sheet_name,
-                                        reference=(
-                                            f"Fila {row_number}"
-                                            if row_number
-                                            else ""
-                                        ),
-                                        keyword=match[
-                                            "keyword"
-                                        ]
-                                    )
-
-
-                                    added = add_unique_item(
-                                        items,
-                                        seen,
-                                        item
-                                    )
-
-
-                                    if added:
-                                        stored_in_sheet += 1
-
+                                    stored_in_sheet += 1
 
                         element.clear()
 
+                        # Una vez que obtuvimos suficiente
+                        # información de esta solapa, no tiene
+                        # sentido seguir recorriendo cientos
+                        # de miles de filas.
+                        if sheet_reached_limit:
+                            break
 
-                if total_matches_in_sheet > stored_in_sheet:
+                if sheet_reached_limit:
 
                     warnings.append(
                         (
                             f"{filename} · {sheet_name}: "
-                            f"se detectó una cantidad elevada "
-                            f"de coincidencias. Se muestran "
-                            f"hasta 250 elementos para revisión."
+                            f"se alcanzó el límite de "
+                            f"{MAX_ITEMS_PER_SHEET} elementos. "
+                            "Se priorizó evitar sobrecargar "
+                            "la aplicación."
                         )
                     )
 
+    except zipfile.BadZipFile:
+
+        raise ValueError(
+            "El archivo Excel no es válido o se encuentra dañado."
+        )
 
     finally:
 
@@ -912,19 +971,18 @@ def extract_xlsx(
             except Exception:
                 pass
 
-
         for path in (
             excel_path,
-            db_path
+            db_path,
         ):
 
+            if not path:
+                continue
+
             try:
-                os.remove(
-                    path
-                )
+                os.remove(path)
             except Exception:
                 pass
-
 
     return items, warnings
 
@@ -944,7 +1002,6 @@ def extract_csv(
 
     raw = uploaded_file.read()
 
-
     try:
 
         text = raw.decode(
@@ -958,14 +1015,9 @@ def extract_csv(
             errors="replace"
         )
 
-
-    stream = StringIO(
-        text
-    )
-
+    stream = StringIO(text)
 
     sample = text[:5000]
-
 
     try:
 
@@ -978,31 +1030,27 @@ def extract_csv(
 
         dialect = csv.excel
 
-
     reader = csv.reader(
         stream,
         dialect
     )
-
 
     for row_number, row in enumerate(
         reader,
         start=1
     ):
 
-        row_text = row_to_text(
-            row
-        )
+        row_text = row_to_text(row)
 
-
-        if not row_text:
+        if (
+            not row_text
+            or not contains_letters(row_text)
+        ):
             continue
-
 
         matches = detect_categories(
             row_text
         )
-
 
         for match in matches:
 
@@ -1013,16 +1061,14 @@ def extract_csv(
                 origin_type="CSV",
                 origin_name="CSV",
                 reference=f"Fila {row_number}",
-                keyword=match["keyword"]
+                keyword=match["keyword"],
             )
-
 
             add_unique_item(
                 items,
                 seen,
                 item
             )
-
 
     return items
 
@@ -1040,13 +1086,15 @@ def extract_docx(
 
     seen = set()
 
-
     document = Document(
         BytesIO(
             uploaded_file.read()
         )
     )
 
+    # --------------------------------------------------------
+    # Párrafos
+    # --------------------------------------------------------
 
     for paragraph_number, paragraph in enumerate(
         document.paragraphs,
@@ -1057,15 +1105,12 @@ def extract_docx(
             paragraph.text
         )
 
-
         if not text:
             continue
-
 
         matches = detect_categories(
             text
         )
-
 
         for match in matches:
 
@@ -1075,10 +1120,11 @@ def extract_docx(
                 filename=filename,
                 origin_type="Word",
                 origin_name="Documento",
-                reference=f"Párrafo {paragraph_number}",
-                keyword=match["keyword"]
+                reference=(
+                    f"Párrafo {paragraph_number}"
+                ),
+                keyword=match["keyword"],
             )
-
 
             add_unique_item(
                 items,
@@ -1086,6 +1132,9 @@ def extract_docx(
                 item
             )
 
+    # --------------------------------------------------------
+    # Tablas
+    # --------------------------------------------------------
 
     for table_number, table in enumerate(
         document.tables,
@@ -1102,20 +1151,16 @@ def extract_docx(
                 for cell in row.cells
             ]
 
-
             row_text = row_to_text(
                 values
             )
 
-
             if not row_text:
                 continue
-
 
             matches = detect_categories(
                 row_text
             )
-
 
             for match in matches:
 
@@ -1124,18 +1169,20 @@ def extract_docx(
                     text=row_text,
                     filename=filename,
                     origin_type="Word",
-                    origin_name=f"Tabla {table_number}",
-                    reference=f"Fila {row_number}",
-                    keyword=match["keyword"]
+                    origin_name=(
+                        f"Tabla {table_number}"
+                    ),
+                    reference=(
+                        f"Fila {row_number}"
+                    ),
+                    keyword=match["keyword"],
                 )
-
 
                 add_unique_item(
                     items,
                     seen,
                     item
                 )
-
 
     return items
 
@@ -1153,16 +1200,13 @@ def extract_pdf(
 
     seen = set()
 
-
     reader = PdfReader(
         BytesIO(
             uploaded_file.read()
         )
     )
 
-
     pages_with_text = 0
-
 
     for page_number, page in enumerate(
         reader.pages,
@@ -1180,13 +1224,10 @@ def extract_pdf(
 
             page_text = ""
 
-
         if not page_text.strip():
             continue
 
-
         pages_with_text += 1
-
 
         lines = [
             clean_text(line)
@@ -1194,20 +1235,16 @@ def extract_pdf(
             if clean_text(line)
         ]
 
-
-        for index, line in enumerate(
-            lines
-        ):
+        for index, line in enumerate(lines):
 
             matches = detect_categories(
                 line
             )
 
-
             if not matches:
                 continue
 
-
+            # Traemos algo de contexto alrededor.
             start = max(
                 0,
                 index - 1
@@ -1218,11 +1255,9 @@ def extract_pdf(
                 index + 3
             )
 
-
             context = " ".join(
                 lines[start:end]
             )
-
 
             for match in matches:
 
@@ -1231,18 +1266,20 @@ def extract_pdf(
                     text=context,
                     filename=filename,
                     origin_type="PDF",
-                    origin_name=f"Página {page_number}",
-                    reference=f"Página {page_number}",
-                    keyword=match["keyword"]
+                    origin_name=(
+                        f"Página {page_number}"
+                    ),
+                    reference=(
+                        f"Página {page_number}"
+                    ),
+                    keyword=match["keyword"],
                 )
-
 
                 add_unique_item(
                     items,
                     seen,
                     item
                 )
-
 
     if pages_with_text == 0:
 
@@ -1251,14 +1288,13 @@ def extract_pdf(
                 category="Advertencia",
                 text=(
                     "No se pudo extraer texto del PDF. "
-                    "El documento puede estar escaneado."
+                    "El documento puede encontrarse escaneado."
                 ),
                 filename=filename,
                 origin_type="PDF",
-                origin_name="Documento"
+                origin_name="Documento",
             )
         )
-
 
     return items
 
@@ -1276,16 +1312,14 @@ def extract_txt(
 
     seen = set()
 
-
     raw = uploaded_file.read()
 
     text = None
 
-
     for encoding in (
         "utf-8-sig",
         "utf-8",
-        "latin1"
+        "latin1",
     ):
 
         try:
@@ -1299,17 +1333,14 @@ def extract_txt(
         except Exception:
             pass
 
-
     if text is None:
         return items
-
 
     lines = [
         clean_text(line)
         for line in text.splitlines()
         if clean_text(line)
     ]
-
 
     for line_number, line in enumerate(
         lines,
@@ -1319,7 +1350,6 @@ def extract_txt(
         matches = detect_categories(
             line
         )
-
 
         for match in matches:
 
@@ -1329,10 +1359,11 @@ def extract_txt(
                 filename=filename,
                 origin_type="TXT",
                 origin_name="Documento",
-                reference=f"Línea {line_number}",
-                keyword=match["keyword"]
+                reference=(
+                    f"Línea {line_number}"
+                ),
+                keyword=match["keyword"],
             )
-
 
             add_unique_item(
                 items,
@@ -1340,29 +1371,24 @@ def extract_txt(
                 item
             )
 
-
     return items
 
 
 # ============================================================
-# TEXTO MANUAL
+# TEXTO INGRESADO MANUALMENTE
 # ============================================================
 
-def extract_free_text(
-    text
-):
+def extract_free_text(text):
 
     items = []
 
     seen = set()
-
 
     lines = [
         clean_text(line)
         for line in text.splitlines()
         if clean_text(line)
     ]
-
 
     for line_number, line in enumerate(
         lines,
@@ -1373,7 +1399,6 @@ def extract_free_text(
             line
         )
 
-
         for match in matches:
 
             item = make_item(
@@ -1382,17 +1407,17 @@ def extract_free_text(
                 filename="Texto ingresado",
                 origin_type="Texto",
                 origin_name="Ingreso manual",
-                reference=f"Línea {line_number}",
-                keyword=match["keyword"]
+                reference=(
+                    f"Línea {line_number}"
+                ),
+                keyword=match["keyword"],
             )
-
 
             add_unique_item(
                 items,
                 seen,
                 item
             )
-
 
     return items
 
@@ -1410,6 +1435,26 @@ def index():
 
 
 # ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    openai_configured = bool(
+        os.getenv(
+            "OPENAI_API_KEY",
+            ""
+        ).strip()
+    )
+
+    return jsonify({
+        "status": "ok",
+        "openaiConfigured": openai_configured,
+    })
+
+
+# ============================================================
 # EXTRAER INFORMACIÓN
 # ============================================================
 
@@ -1423,12 +1468,10 @@ def extract_information():
         "files"
     )
 
-
     free_text = request.form.get(
         "freeText",
         ""
     ).strip()
-
 
     if not files and not free_text:
 
@@ -1439,27 +1482,22 @@ def extract_information():
             )
         }), 400
 
-
     extracted_items = []
 
     errors = []
 
     warnings = []
 
-
     for uploaded_file in files:
 
         filename = (
             uploaded_file.filename
-            or
-            "archivo_sin_nombre"
+            or "archivo_sin_nombre"
         )
-
 
         extension = get_extension(
             filename
         )
-
 
         if extension not in ALLOWED_EXTENSIONS:
 
@@ -1469,28 +1507,25 @@ def extract_information():
 
             continue
 
-
         try:
 
             if extension == "xlsx":
 
-                excel_items, excel_warnings = (
-                    extract_xlsx(
-                        uploaded_file,
-                        filename
-                    )
+                (
+                    excel_items,
+                    excel_warnings
+                ) = extract_xlsx(
+                    uploaded_file,
+                    filename
                 )
-
 
                 extracted_items.extend(
                     excel_items
                 )
 
-
                 warnings.extend(
                     excel_warnings
                 )
-
 
             elif extension == "csv":
 
@@ -1501,7 +1536,6 @@ def extract_information():
                     )
                 )
 
-
             elif extension == "docx":
 
                 extracted_items.extend(
@@ -1510,7 +1544,6 @@ def extract_information():
                         filename
                     )
                 )
-
 
             elif extension == "pdf":
 
@@ -1521,7 +1554,6 @@ def extract_information():
                     )
                 )
 
-
             elif extension == "txt":
 
                 extracted_items.extend(
@@ -1531,19 +1563,20 @@ def extract_information():
                     )
                 )
 
-
         except Exception as exc:
 
             print(
-                f"Error procesando {filename}:",
-                str(exc)
+                f"Error procesando {filename}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True
             )
-
 
             errors.append(
-                f"{filename}: {str(exc)}"
+                (
+                    f"{filename}: no pudo procesarse "
+                    f"({type(exc).__name__})."
+                )
             )
-
 
     if free_text:
 
@@ -1553,21 +1586,21 @@ def extract_information():
             )
         )
 
-
     return jsonify({
         "items": extracted_items,
         "count": len(extracted_items),
         "errors": errors,
         "warnings": warnings,
         "message": (
-            f"Se identificaron {len(extracted_items)} "
+            f"Se identificaron "
+            f"{len(extracted_items)} "
             "elementos potencialmente relevantes. "
             "Revisalos antes de incorporarlos al memo."
-        )
+        ),
     })
 
 
-# Mantener compatibilidad con una versión anterior.
+# Compatibilidad con versión anterior
 @app.route(
     "/analyze",
     methods=["POST"]
@@ -1591,14 +1624,12 @@ def improve_text():
         silent=True
     ) or {}
 
-
     text = clean_text(
         data.get(
             "text",
             ""
         )
     )
-
 
     field_type = clean_text(
         data.get(
@@ -1607,32 +1638,50 @@ def improve_text():
         )
     )
 
-
     if not text:
 
         return jsonify({
             "error": (
-                "Primero escribí una idea o texto para mejorar."
+                "Primero escribí una idea "
+                "o texto para mejorar."
             )
         }), 400
 
+    # --------------------------------------------------------
+    # Leer OpenAI en el momento de la llamada
+    # --------------------------------------------------------
 
-    if not client:
+    openai_client = get_openai_client()
+
+    if not openai_client:
+
+        print(
+            "OPENAI_API_KEY no disponible "
+            "en el proceso de Render.",
+            flush=True
+        )
 
         return jsonify({
             "error": (
-                "La función de IA no está configurada. "
-                "Verificá OPENAI_API_KEY en Render."
+                "Render no está entregando "
+                "OPENAI_API_KEY al proceso "
+                "de la aplicación."
             )
         }), 500
 
+    # --------------------------------------------------------
+    # Instrucciones
+    # --------------------------------------------------------
 
     instructions = """
-Actuá como especialista en redacción de Auditoría Interna.
+Actuá como especialista en redacción de Auditoría Interna,
+con experiencia en procesos corporativos y retail mayorista.
 
-Tu tarea NO es realizar la auditoría ni generar hechos nuevos.
-Tu tarea es mejorar, ampliar y profesionalizar exclusivamente
-la información escrita por el auditor.
+Tu función es mejorar la redacción aportada por el auditor.
+
+NO debés realizar la auditoría.
+NO debés generar hechos nuevos.
+NO debés inferir evidencia que no fue suministrada.
 
 REGLAS OBLIGATORIAS:
 
@@ -1640,128 +1689,147 @@ REGLAS OBLIGATORIAS:
 - No inventes importes.
 - No inventes cantidades.
 - No inventes fechas.
-- No inventes nombres de proveedores, clientes o personas.
-- No inventes sistemas, transacciones, reportes o documentos.
+- No inventes períodos.
+- No inventes proveedores.
+- No inventes clientes.
+- No inventes personas.
+- No inventes sucursales.
+- No inventes sistemas.
+- No inventes transacciones.
+- No inventes documentos.
 - No inventes controles realizados.
 - No inventes muestras.
 - No inventes resultados.
 - No inventes hallazgos.
 - No inventes evidencia.
 - No inventes conclusiones.
-- No agregues períodos que no hayan sido informados.
-- Conservá el significado del texto original.
-- Podés ampliar conceptualmente el propósito cuando sea necesario
-  para que la redacción sea completa y profesional.
-- Utilizá lenguaje claro, técnico y corporativo.
-- Evitá lenguaje excesivamente jurídico o rebuscado.
-- Devolvé solamente el texto final mejorado.
-- No expliques qué cambiaste.
+- No atribuyas causas que no fueron informadas.
+
+Conservá siempre el significado del texto original.
+
+La redacción debe ser:
+
+- clara;
+- técnica;
+- profesional;
+- corporativa;
+- directa;
+- aplicable a Auditoría Interna.
+
+Evitá lenguaje excesivamente jurídico,
+rebuscado o innecesariamente extenso.
+
+Devolvé únicamente el texto final mejorado.
+No expliques los cambios realizados.
 
 CRITERIOS SEGÚN EL CAMPO:
 
 OBJETIVO:
-Transformá ideas breves en un objetivo de auditoría completo.
+Transformá la idea aportada en un objetivo de auditoría claro.
 Preferí verbos como validar, verificar, identificar, evaluar,
 analizar o corroborar.
-Podés expresar finalidades lógicas propias del mismo concepto,
-pero no agregar procedimientos concretos que el auditor no indicó.
+Podés desarrollar conceptualmente el propósito del objetivo,
+pero no incorporar pruebas o procedimientos que no fueron indicados.
 
 ALCANCE:
-Ordená y profesionalizá los límites del trabajo únicamente con
-la información proporcionada. No inventes períodos, sociedades,
-sucursales ni poblaciones.
+Ordená y profesionalizá los límites del trabajo exclusivamente
+sobre la información proporcionada.
+No inventes períodos, sociedades, locales, sucursales,
+universos ni poblaciones.
 
 SITUACIÓN OBSERVADA:
-Describí objetivamente la situación informada. No agregues causas,
-cantidades o consecuencias no suministradas.
+Describí objetivamente la situación informada.
+Separá hechos de consecuencias.
+No agregues causas, importes, cantidades o circunstancias
+que no hayan sido suministradas.
 
 RIESGO:
-Mejorá la redacción del riesgo informado. No agregues impactos
-económicos cuantificados ni consecuencias específicas sin sustento.
+Mejorá la formulación del riesgo informado.
+Orientá la redacción a posibles impactos operativos,
+financieros, de cumplimiento, trazabilidad o control,
+pero sin inventar consecuencias específicas que no se desprendan
+razonablemente del texto original.
 
 PROPUESTA DE MEJORA:
-Mejorá la acción propuesta orientándola a fortalecer controles,
-trazabilidad, eficiencia o mitigación del riesgo, sin inventar
-acciones que contradigan la intención del auditor.
+Profesionalizá la medida indicada por el auditor.
+Orientala a fortalecer controles, trazabilidad,
+eficiencia operativa, segregación de funciones,
+documentación o mitigación de riesgos,
+sin cambiar la intención de la propuesta original.
 """
-
 
     prompt = f"""
 TIPO DE CAMPO:
 {field_type}
 
-TEXTO ESCRITO POR EL AUDITOR:
+TEXTO ORIGINAL DEL AUDITOR:
 {text}
 
 Redactá una versión profesional, clara y suficientemente completa,
-respetando estrictamente las reglas indicadas.
+respetando estrictamente todas las instrucciones.
 """
-
 
     try:
 
-        response = client.responses.create(
+        response = openai_client.responses.create(
             model="gpt-5.6-luna",
             instructions=instructions,
             input=prompt
         )
 
-
         improved = clean_text(
             response.output_text
         )
-
 
         if not improved:
 
             return jsonify({
                 "error": (
-                    "La IA no devolvió una redacción."
+                    "La IA no devolvió "
+                    "una redacción."
                 )
             }), 500
 
-
         return jsonify({
             "original": text,
-            "improved": improved
+            "improved": improved,
         })
-
 
     except Exception as exc:
 
         print(
-            "Error OpenAI /improve-text:",
-            str(exc)
+            (
+                "Error OpenAI /improve-text: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            flush=True
         )
-
 
         return jsonify({
             "error": (
-                "No se pudo mejorar el texto con IA. "
-                "Revisá la configuración de OpenAI en Render."
+                "OpenAI está configurado, "
+                "pero la solicitud no pudo completarse. "
+                "Revisá el log de Render para ver "
+                "el detalle del error."
             )
         }), 500
 
 
 # ============================================================
-# EXPORTAR EXCEL
+# FORMATO DE EXPORTACIÓN
 # ============================================================
 
-def format_header(
-    cell
-):
+def format_header(cell):
 
     cell.fill = PatternFill(
         "solid",
         fgColor="17365D"
     )
 
-
     cell.font = Font(
         color="FFFFFF",
         bold=True
     )
-
 
     cell.alignment = Alignment(
         horizontal="center",
@@ -1770,19 +1838,15 @@ def format_header(
     )
 
 
-def auto_width(
-    worksheet
-):
+def auto_width(worksheet):
 
     for column in worksheet.columns:
 
         max_length = 0
 
-
         column_letter = get_column_letter(
             column[0].column
         )
-
 
         for cell in column:
 
@@ -1791,24 +1855,17 @@ def auto_width(
                 wrap_text=True
             )
 
-
             if cell.value is None:
                 continue
-
 
             length = len(
                 str(cell.value)
             )
 
-
             max_length = max(
                 max_length,
-                min(
-                    length,
-                    70
-                )
+                min(length, 70)
             )
-
 
         worksheet.column_dimensions[
             column_letter
@@ -1821,6 +1878,10 @@ def auto_width(
         )
 
 
+# ============================================================
+# EXPORTAR EXCEL
+# ============================================================
+
 @app.route(
     "/export-excel",
     methods=["POST"]
@@ -1831,39 +1892,32 @@ def export_excel():
         silent=True
     ) or {}
 
-
     memo = payload.get(
         "memo",
         {}
     )
-
 
     general = memo.get(
         "general",
         {}
     )
 
-
     findings = memo.get(
         "findings",
         []
     )
-
 
     sources = memo.get(
         "sources",
         []
     )
 
-
     extracted = memo.get(
         "extracted",
         []
     )
 
-
     workbook = Workbook()
-
 
     # ========================================================
     # MEMO
@@ -1873,22 +1927,16 @@ def export_excel():
 
     ws.title = "Memo"
 
-
     ws.merge_cells(
         "A1:F1"
     )
 
-
-    ws["A1"] = (
-        "AUDITORÍA INTERNA"
-    )
-
+    ws["A1"] = "AUDITORÍA INTERNA"
 
     ws["A1"].fill = PatternFill(
         "solid",
         fgColor="17365D"
     )
-
 
     ws["A1"].font = Font(
         color="FFFFFF",
@@ -1896,16 +1944,14 @@ def export_excel():
         size=14
     )
 
-
     ws["A1"].alignment = Alignment(
         horizontal="center"
     )
 
-
     row = 3
 
-
     general_rows = [
+
         (
             "Auditoría",
             general.get(
@@ -1913,6 +1959,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Área",
             general.get(
@@ -1920,6 +1967,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Proceso",
             general.get(
@@ -1927,6 +1975,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Período",
             general.get(
@@ -1934,6 +1983,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Auditor",
             general.get(
@@ -1941,6 +1991,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Objetivo",
             general.get(
@@ -1948,6 +1999,7 @@ def export_excel():
                 ""
             )
         ),
+
         (
             "Alcance",
             general.get(
@@ -1957,7 +2009,6 @@ def export_excel():
         ),
     ]
 
-
     for label, value in general_rows:
 
         ws.cell(
@@ -1965,7 +2016,6 @@ def export_excel():
             column=1,
             value=label
         )
-
 
         ws.cell(
             row=row,
@@ -1975,7 +2025,6 @@ def export_excel():
             color="17365D"
         )
 
-
         ws.merge_cells(
             start_row=row,
             start_column=2,
@@ -1983,19 +2032,19 @@ def export_excel():
             end_column=6
         )
 
-
         ws.cell(
             row=row,
             column=2,
             value=value
         )
 
-
         row += 1
-
 
     row += 2
 
+    # ========================================================
+    # HALLAZGOS EN MEMO
+    # ========================================================
 
     for index, finding in enumerate(
         findings,
@@ -2009,7 +2058,6 @@ def export_excel():
             end_column=6
         )
 
-
         ws.cell(
             row=row,
             column=1,
@@ -2019,7 +2067,6 @@ def export_excel():
             )
         )
 
-
         ws.cell(
             row=row,
             column=1
@@ -2027,7 +2074,6 @@ def export_excel():
             "solid",
             fgColor="EAF2F8"
         )
-
 
         ws.cell(
             row=row,
@@ -2037,9 +2083,7 @@ def export_excel():
             color="17365D"
         )
 
-
         row += 1
-
 
         details = [
 
@@ -2116,7 +2160,6 @@ def export_excel():
             ),
         ]
 
-
         for label, value in details:
 
             ws.cell(
@@ -2125,14 +2168,12 @@ def export_excel():
                 value=label
             )
 
-
             ws.cell(
                 row=row,
                 column=1
             ).font = Font(
                 bold=True
             )
-
 
             ws.merge_cells(
                 start_row=row,
@@ -2141,33 +2182,25 @@ def export_excel():
                 end_column=6
             )
 
-
             ws.cell(
                 row=row,
                 column=2,
                 value=value
             )
 
-
             row += 1
-
 
         row += 2
 
-
-    auto_width(
-        ws
-    )
-
+    auto_width(ws)
 
     # ========================================================
-    # HALLAZGOS
+    # HOJA HALLAZGOS
     # ========================================================
 
     ws_findings = workbook.create_sheet(
         "Hallazgos"
     )
-
 
     finding_headers = [
         "N°",
@@ -2188,18 +2221,12 @@ def export_excel():
         "Seguimiento",
     ]
 
-
     ws_findings.append(
         finding_headers
     )
 
-
     for cell in ws_findings[1]:
-
-        format_header(
-            cell
-        )
-
+        format_header(cell)
 
     for index, finding in enumerate(
         findings,
@@ -2225,14 +2252,11 @@ def export_excel():
             finding.get("followUp", ""),
         ])
 
-
     ws_findings.freeze_panes = "A2"
-
 
     auto_width(
         ws_findings
     )
-
 
     # ========================================================
     # FUENTES
@@ -2242,21 +2266,15 @@ def export_excel():
         "Fuentes"
     )
 
-
     ws_sources.append([
         "Nombre",
         "Tipo",
         "Referencia",
-        "Descripción"
+        "Descripción",
     ])
 
-
     for cell in ws_sources[1]:
-
-        format_header(
-            cell
-        )
-
+        format_header(cell)
 
     for source in sources:
 
@@ -2267,11 +2285,9 @@ def export_excel():
             source.get("description", ""),
         ])
 
-
     auto_width(
         ws_sources
     )
-
 
     # ========================================================
     # TRAZABILIDAD
@@ -2280,7 +2296,6 @@ def export_excel():
     ws_trace = workbook.create_sheet(
         "Trazabilidad"
     )
-
 
     ws_trace.append([
         "Tipo detectado",
@@ -2292,13 +2307,8 @@ def export_excel():
         "Incluido",
     ])
 
-
     for cell in ws_trace[1]:
-
-        format_header(
-            cell
-        )
-
+        format_header(cell)
 
     for item in extracted:
 
@@ -2316,39 +2326,29 @@ def export_excel():
             ),
         ])
 
-
     auto_width(
         ws_trace
     )
 
-
     # ========================================================
-    # DESCARGA
+    # GENERAR ARCHIVO
     # ========================================================
 
     output = BytesIO()
-
 
     workbook.save(
         output
     )
 
-
-    output.seek(
-        0
-    )
-
+    output.seek(0)
 
     filename = (
         "Audit_Memo_"
-        +
-        datetime.now().strftime(
+        + datetime.now().strftime(
             "%Y%m%d_%H%M%S"
         )
-        +
-        ".xlsx"
+        + ".xlsx"
     )
-
 
     return send_file(
         output,
@@ -2357,12 +2357,12 @@ def export_excel():
         mimetype=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
-        )
+        ),
     )
 
 
 # ============================================================
-# RUN
+# RUN LOCAL
 # ============================================================
 
 if __name__ == "__main__":
@@ -2373,7 +2373,6 @@ if __name__ == "__main__":
             5000
         )
     )
-
 
     app.run(
         host="0.0.0.0",
