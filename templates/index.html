@@ -1,11 +1,14 @@
 <!DOCTYPE html>
 <html lang="es">
-
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Audit Memo Builder | Auditoría Interna</title>
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Audit Memo Builder</title>
 
     <link
         rel="stylesheet"
@@ -13,1079 +16,693 @@
     >
 </head>
 
-
 <body>
 
-<header class="app-header">
+<div class="app-shell">
 
-    <div class="header-content">
+    <!-- =====================================================
+         SIDEBAR
+    ====================================================== -->
 
-        <div class="header-left">
+    <aside class="sidebar">
 
-            <div class="logo-icon">
-                📋
+        <div class="brand">
+
+            <div class="brand-icon">
+                AI
             </div>
 
             <div>
-                <h1>Audit Memo Builder</h1>
+                <h1>Audit Memo</h1>
+                <span>Builder</span>
+            </div>
 
-                <p class="header-subtitle">
-                    Herramienta para Auditoría Interna
+        </div>
+
+        <nav class="steps">
+
+            <button
+                class="step-item active"
+                data-step="1"
+                onclick="goToStep(1)"
+            >
+                <span class="step-number">01</span>
+
+                <span>
+                    <strong>Información</strong>
+                    <small>Datos y evidencia</small>
+                </span>
+            </button>
+
+            <button
+                class="step-item"
+                data-step="2"
+                onclick="goToStep(2)"
+            >
+                <span class="step-number">02</span>
+
+                <span>
+                    <strong>Extracción</strong>
+                    <small>Contenido identificado</small>
+                </span>
+            </button>
+
+            <button
+                class="step-item"
+                data-step="3"
+                onclick="goToStep(3)"
+            >
+                <span class="step-number">03</span>
+
+                <span>
+                    <strong>Hallazgos</strong>
+                    <small>Estructura uniforme</small>
+                </span>
+            </button>
+
+            <button
+                class="step-item"
+                data-step="4"
+                onclick="goToStep(4)"
+            >
+                <span class="step-number">04</span>
+
+                <span>
+                    <strong>Memo</strong>
+                    <small>Vista previa</small>
+                </span>
+            </button>
+
+            <button
+                class="step-item"
+                data-step="5"
+                onclick="goToStep(5)"
+            >
+                <span class="step-number">05</span>
+
+                <span>
+                    <strong>Finalizar</strong>
+                    <small>Control y exportación</small>
+                </span>
+            </button>
+
+        </nav>
+
+        <div class="sidebar-note">
+
+            <strong>Objetivo</strong>
+
+            <p>
+                Estandarizar los memos de Auditoría Interna
+                manteniendo trazabilidad con los papeles de trabajo.
+            </p>
+
+        </div>
+
+    </aside>
+
+
+    <!-- =====================================================
+         MAIN
+    ====================================================== -->
+
+    <main class="main-content">
+
+
+        <!-- =================================================
+             STEP 1
+        ================================================== -->
+
+        <section
+            class="page-step active"
+            id="step1"
+        >
+
+            <div class="page-header">
+
+                <div>
+                    <span class="eyebrow">
+                        NUEVO MEMO
+                    </span>
+
+                    <h2>
+                        Información del trabajo
+                    </h2>
+
+                    <p>
+                        Completá los datos generales y cargá los
+                        papeles de trabajo utilizados en la auditoría.
+                    </p>
+                </div>
+
+            </div>
+
+
+            <div class="card">
+
+                <div class="card-header">
+                    <div>
+                        <h3>Datos generales</h3>
+
+                        <p>
+                            Esta información formará parte del
+                            encabezado uniforme del memo.
+                        </p>
+                    </div>
+                </div>
+
+
+                <div class="form-grid">
+
+                    <div class="field field-wide">
+                        <label>Nombre de la auditoría</label>
+
+                        <input
+                            id="auditTitle"
+                            type="text"
+                            placeholder="Ej. Acuerdos Comerciales"
+                        >
+                    </div>
+
+
+                    <div class="field">
+                        <label>Área</label>
+
+                        <input
+                            id="auditArea"
+                            type="text"
+                            placeholder="Ej. Comercial"
+                        >
+                    </div>
+
+
+                    <div class="field">
+                        <label>Proceso</label>
+
+                        <input
+                            id="auditProcess"
+                            type="text"
+                            placeholder="Ej. Gestión de acuerdos"
+                        >
+                    </div>
+
+
+                    <div class="field">
+                        <label>Período</label>
+
+                        <input
+                            id="auditPeriod"
+                            type="text"
+                            placeholder="Ej. Enero - Junio 2026"
+                        >
+                    </div>
+
+
+                    <div class="field">
+                        <label>Auditor</label>
+
+                        <input
+                            id="auditAuditor"
+                            type="text"
+                            placeholder="Nombre del auditor"
+                        >
+                    </div>
+
+
+                    <div class="field field-wide">
+                        <label>Objetivo</label>
+
+                        <textarea
+                            id="auditObjective"
+                            rows="3"
+                            placeholder="Objetivo del trabajo..."
+                        ></textarea>
+                    </div>
+
+
+                    <div class="field field-wide">
+                        <label>Alcance</label>
+
+                        <textarea
+                            id="auditScope"
+                            rows="3"
+                            placeholder="Período, procesos, sistemas o documentación comprendida..."
+                        ></textarea>
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <div class="card">
+
+                <div class="card-header">
+
+                    <div>
+                        <h3>Papeles de trabajo</h3>
+
+                        <p>
+                            Cargá documentación ya trabajada.
+                            La herramienta extraerá información
+                            existente, sin realizar conclusiones
+                            automáticas de auditoría.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <label
+                    class="drop-zone"
+                    id="dropZone"
+                    for="fileInput"
+                >
+
+                    <div class="upload-icon">
+                        ↑
+                    </div>
+
+                    <strong>
+                        Arrastrá tus papeles de trabajo
+                    </strong>
+
+                    <span>
+                        o hacé clic para seleccionar archivos
+                    </span>
+
+                    <small>
+                        Excel · Word · PDF · CSV · TXT
+                    </small>
+
+                </label>
+
+
+                <input
+                    type="file"
+                    id="fileInput"
+                    multiple
+                    hidden
+                    accept=".xlsx,.csv,.docx,.pdf,.txt"
+                >
+
+
+                <div
+                    id="fileList"
+                    class="file-list"
+                ></div>
+
+
+                <div class="field top-space">
+
+                    <label>
+                        Texto adicional
+                        <span class="optional">
+                            Opcional
+                        </span>
+                    </label>
+
+                    <textarea
+                        id="freeText"
+                        rows="4"
+                        placeholder="Podés agregar conclusiones, comentarios o información que no esté incluida en los archivos."
+                    ></textarea>
+
+                </div>
+
+            </div>
+
+
+            <div class="page-actions">
+
+                <div></div>
+
+                <button
+                    class="btn btn-primary"
+                    onclick="extractInformation()"
+                >
+                    Extraer información
+                    <span>→</span>
+                </button>
+
+            </div>
+
+        </section>
+
+
+        <!-- =================================================
+             STEP 2
+        ================================================== -->
+
+        <section
+            class="page-step"
+            id="step2"
+        >
+
+            <div class="page-header">
+
+                <div>
+                    <span class="eyebrow">
+                        EXTRACCIÓN
+                    </span>
+
+                    <h2>
+                        Información identificada
+                    </h2>
+
+                    <p>
+                        Revisá el contenido encontrado en los papeles
+                        de trabajo y seleccioná lo que querés utilizar.
+                    </p>
+                </div>
+
+
+                <div
+                    class="count-badge"
+                    id="extractedCount"
+                >
+                    0 elementos
+                </div>
+
+            </div>
+
+
+            <div class="info-banner">
+
+                <div class="info-icon">
+                    i
+                </div>
+
+                <div>
+                    <strong>
+                        La herramienta no está auditando la base.
+                    </strong>
+
+                    <p>
+                        Busca información ya documentada como
+                        hallazgos, conclusiones, diferencias,
+                        observaciones, riesgos y propuestas.
+                        La incorporación al memo siempre queda
+                        sujeta a tu validación.
+                    </p>
+                </div>
+
+            </div>
+
+
+            <div
+                id="extractionEmpty"
+                class="empty-state"
+            >
+                <div class="empty-icon">
+                    ⌕
+                </div>
+
+                <h3>
+                    Todavía no hay información extraída
+                </h3>
+
+                <p>
+                    Cargá tus papeles de trabajo desde el paso anterior.
                 </p>
             </div>
 
-        </div>
 
+            <div
+                id="extractionList"
+                class="extraction-list"
+            ></div>
 
-        <div class="header-right">
 
-            <button
-                class="btn btn-header"
-                onclick="saveProgress()"
-            >
-                💾 Guardar
-            </button>
+            <div class="page-actions">
 
-            <button
-                class="btn btn-header"
-                onclick="newMemo()"
-            >
-                🔄 Nuevo
-            </button>
-
-        </div>
-
-    </div>
-
-</header>
-
-
-<!-- ===================================================== -->
-<!-- DASHBOARD -->
-<!-- ===================================================== -->
-
-<section
-    id="auditDashboard"
-    class="dashboard"
->
-
-    <div class="metric">
-        <div
-            class="metric-value"
-            id="metricFiles"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Archivos
-        </div>
-    </div>
-
-
-    <div class="metric">
-        <div
-            class="metric-value"
-            id="metricFacts"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Hechos
-        </div>
-    </div>
-
-
-    <div class="metric accepted">
-        <div
-            class="metric-value"
-            id="metricAccepted"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Aceptados
-        </div>
-    </div>
-
-
-    <div class="metric">
-        <div
-            class="metric-value"
-            id="metricTasks"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Tareas
-        </div>
-    </div>
-
-
-    <div class="metric">
-        <div
-            class="metric-value"
-            id="metricFindings"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Hallazgos
-        </div>
-    </div>
-
-
-    <div class="metric high">
-        <div
-            class="metric-value"
-            id="metricHigh"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Altos
-        </div>
-    </div>
-
-
-    <div class="metric medium">
-        <div
-            class="metric-value"
-            id="metricMedium"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Medios
-        </div>
-    </div>
-
-
-    <div class="metric low">
-        <div
-            class="metric-value"
-            id="metricLow"
-        >
-            0
-        </div>
-
-        <div class="metric-label">
-            Bajos
-        </div>
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- NAVEGACIÓN -->
-<!-- ===================================================== -->
-
-<nav class="step-navigation">
-
-    <div
-        class="step-nav-item active"
-        data-step="1"
-        onclick="goToStep(1)"
-    >
-        <div class="step-nav-number">1</div>
-        <div class="step-nav-label">Información</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="2"
-        onclick="goToStep(2)"
-    >
-        <div class="step-nav-number">2</div>
-        <div class="step-nav-label">Datos</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="3"
-        onclick="goToStep(3)"
-    >
-        <div class="step-nav-number">3</div>
-        <div class="step-nav-label">Hechos</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="4"
-        onclick="goToStep(4)"
-    >
-        <div class="step-nav-number">4</div>
-        <div class="step-nav-label">Tareas</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="5"
-        onclick="goToStep(5)"
-    >
-        <div class="step-nav-number">5</div>
-        <div class="step-nav-label">Hallazgos</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="6"
-        onclick="goToStep(6)"
-    >
-        <div class="step-nav-number">6</div>
-        <div class="step-nav-label">Memo</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="7"
-        onclick="goToStep(7)"
-    >
-        <div class="step-nav-number">7</div>
-        <div class="step-nav-label">Revisión</div>
-    </div>
-
-
-    <div
-        class="step-nav-item"
-        data-step="8"
-        onclick="goToStep(8)"
-    >
-        <div class="step-nav-number">8</div>
-        <div class="step-nav-label">Exportar</div>
-    </div>
-
-</nav>
-
-
-<main class="main-content">
-
-
-<!-- ===================================================== -->
-<!-- PASO 1 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-1"
-    class="step-section active"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                📁 Cargar información
-            </h2>
-
-            <p class="section-description">
-                Cargá la documentación y papeles de trabajo
-                utilizados en la auditoría.
-            </p>
-
-        </div>
-
-
-        <div
-            class="upload-area"
-            id="dropZone"
-        >
-
-            <div class="upload-icon">
-                📂
-            </div>
-
-            <h3>
-                Arrastrá archivos acá o hacé clic
-            </h3>
-
-            <p>
-                Excel, Word, PDF, CSV y TXT
-            </p>
-
-
-            <input
-                type="file"
-                id="fileInput"
-                multiple
-                accept=".xlsx,.xls,.docx,.pdf,.csv,.txt"
-                hidden
-            >
-
-
-            <button
-                class="btn btn-primary"
-                type="button"
-                onclick="document.getElementById('fileInput').click()"
-            >
-                Seleccionar archivos
-            </button>
-
-        </div>
-
-
-        <div class="file-list">
-
-            <h4>
-                📄 Archivos cargados
-            </h4>
-
-            <div id="filesContainer"></div>
-
-        </div>
-
-
-        <div class="text-input-section">
-
-            <h4>
-                📝 Información adicional / texto libre
-            </h4>
-
-            <textarea
-                id="freeText"
-                placeholder="Pegá acá información proveniente de mails, reuniones, notas, comentarios del área, explicaciones, etc."
-            ></textarea>
-
-        </div>
-
-
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                disabled
-            >
-                Anterior
-            </button>
-
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(2)"
-            >
-                Continuar →
-            </button>
-
-        </div>
-
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- PASO 2 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-2"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                📊 Datos generales
-            </h2>
-
-            <p class="section-description">
-                Identificá el trabajo de auditoría y su alcance.
-            </p>
-
-        </div>
-
-
-        <div class="form-grid">
-
-            <div class="form-group full-width">
-
-                <label>
-                    Nombre / Título *
-                </label>
-
-                <input
-                    type="text"
-                    id="auditTitle"
-                    placeholder="Ej. Auditoría de Préstamos a Comisionistas"
+                <button
+                    class="btn btn-secondary"
+                    onclick="goToStep(1)"
                 >
+                    ← Volver
+                </button>
 
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Análisis *
-                </label>
-
-                <input
-                    type="text"
-                    id="analysis"
-                    placeholder="Ej. Préstamos otorgados"
+                <button
+                    class="btn btn-primary"
+                    onclick="convertSelectedToFindings()"
                 >
+                    Continuar con seleccionados
+                    →
+                </button>
 
             </div>
 
+        </section>
 
-            <div class="form-group">
 
-                <label>
-                    Sector / área auditada *
-                </label>
+        <!-- =================================================
+             STEP 3
+        ================================================== -->
 
-                <input
-                    type="text"
-                    id="sector"
-                    placeholder="Ej. Créditos"
-                >
-
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Proceso
-                </label>
-
-                <input
-                    type="text"
-                    id="process"
-                    placeholder="Ej. Otorgamiento y recupero de préstamos"
-                >
-
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Período *
-                </label>
-
-                <input
-                    type="text"
-                    id="period"
-                    placeholder="Ej. 01/07/2025 al 30/06/2026"
-                >
-
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Alcance de la muestra
-                </label>
-
-                <input
-                    type="text"
-                    id="scope"
-                    placeholder="Ej. 100% de los préstamos informados"
-                >
-
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Fecha
-                </label>
-
-                <input
-                    type="date"
-                    id="workDate"
-                >
-
-            </div>
-
-
-            <div class="form-group">
-
-                <label>
-                    Auditor responsable
-                </label>
-
-                <input
-                    type="text"
-                    id="auditor"
-                    placeholder="Nombre del auditor"
-                >
-
-            </div>
-
-        </div>
-
-
-        <div class="form-group">
-
-            <label>
-                Contexto / información adicional
-            </label>
-
-            <textarea
-                id="context"
-                placeholder="Información relevante para comprender el trabajo..."
-            ></textarea>
-
-        </div>
-
-
-        <div class="form-group">
-
-            <label>
-                Instrucciones de redacción
-            </label>
-
-            <textarea
-                id="writingInstructions"
-                placeholder="Ej. Memo ejecutivo, redacción breve, mantener términos utilizados por el área..."
-            ></textarea>
-
-        </div>
-
-
-        <!-- OBJETIVOS -->
-
-        <div class="objectives-section">
-
-            <h3>
-                🎯 Objetivos
-            </h3>
-
-            <p class="section-description">
-                Podés incorporar uno o varios objetivos.
-            </p>
-
-            <div id="objectivesContainer"></div>
-
-
-            <button
-                class="btn btn-secondary btn-sm"
-                onclick="addObjective()"
-            >
-                + Agregar objetivo
-            </button>
-
-        </div>
-
-
-        <!-- FUENTES -->
-
-        <div class="sources-section">
-
-            <h3>
-                📚 Fuentes de información / evidencia
-            </h3>
-
-            <p class="section-description">
-                Agregá las fuentes reales utilizadas.
-                El tipo funciona solamente como clasificación y no limita
-                el nombre de la fuente.
-            </p>
-
-
-            <div id="sourcesContainer"></div>
-
-
-            <button
-                class="btn btn-secondary btn-sm"
-                onclick="addSource()"
-            >
-                + Agregar fuente
-            </button>
-
-        </div>
-
-
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(1)"
-            >
-                ← Anterior
-            </button>
-
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(3)"
-            >
-                Continuar →
-            </button>
-
-        </div>
-
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- PASO 3 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-3"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                ✅ Hechos identificados
-            </h2>
-
-            <p class="section-description">
-                Revisá la información objetiva extraída de la documentación.
-            </p>
-
-        </div>
-
-
-        <div class="alert-box">
-
-            <strong>⚠️</strong>
-
-            La herramienta solo debe mostrar información obtenida
-            de los archivos cargados o del texto ingresado.
-            Validá cada elemento antes de incorporarlo al memo.
-
-        </div>
-
-
-        <button
-            class="btn btn-primary btn-lg"
-            onclick="analyzeDocuments(this)"
+        <section
+            class="page-step"
+            id="step3"
         >
-            🔍 Analizar documentación
-        </button>
+
+            <div class="page-header">
+
+                <div>
+                    <span class="eyebrow">
+                        HALLAZGOS
+                    </span>
+
+                    <h2>
+                        Estructura del memo
+                    </h2>
+
+                    <p>
+                        Todos los hallazgos mantienen el mismo
+                        esquema para asegurar uniformidad.
+                    </p>
+                </div>
 
 
-        <div
-            id="factsContainer"
-            class="facts-container"
-        ></div>
+                <button
+                    class="btn btn-secondary"
+                    onclick="addFinding()"
+                >
+                    + Agregar hallazgo
+                </button>
+
+            </div>
 
 
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(2)"
+            <div
+                id="findingsEmpty"
+                class="empty-state"
             >
-                ← Anterior
-            </button>
+                <div class="empty-icon">
+                    !
+                </div>
 
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(4)"
-            >
-                Continuar →
-            </button>
+                <h3>
+                    No hay hallazgos todavía
+                </h3>
 
-        </div>
-
-    </div>
-
-</section>
+                <p>
+                    Podés convertir información extraída o
+                    agregar un hallazgo manualmente.
+                </p>
+            </div>
 
 
-<!-- ===================================================== -->
-<!-- PASO 4 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-4"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                📋 Tareas realizadas
-            </h2>
-
-            <p class="section-description">
-                Documentá las pruebas y procedimientos efectivamente realizados.
-            </p>
-
-        </div>
+            <div
+                id="findingsList"
+                class="findings-list"
+            ></div>
 
 
-        <div id="tasksContainer"></div>
+            <div class="page-actions">
+
+                <button
+                    class="btn btn-secondary"
+                    onclick="goToStep(2)"
+                >
+                    ← Volver
+                </button>
+
+                <button
+                    class="btn btn-primary"
+                    onclick="goToStep(4)"
+                >
+                    Ver memo
+                    →
+                </button>
+
+            </div>
+
+        </section>
 
 
-        <button
-            class="btn btn-secondary btn-sm"
-            onclick="addTask()"
+        <!-- =================================================
+             STEP 4
+        ================================================== -->
+
+        <section
+            class="page-step"
+            id="step4"
         >
-            + Agregar tarea
-        </button>
+
+            <div class="page-header">
+
+                <div>
+                    <span class="eyebrow">
+                        MEMO
+                    </span>
+
+                    <h2>
+                        Vista previa
+                    </h2>
+
+                    <p>
+                        Revisá cómo quedará estructurado el memo
+                        antes de finalizarlo.
+                    </p>
+                </div>
+
+            </div>
 
 
-        <div class="results-section">
-
-            <h3>
-                📊 Resultados
-            </h3>
-
-            <p class="section-description">
-                Incorporá resultados cuantitativos o conclusiones puntuales
-                obtenidas durante las pruebas.
-            </p>
+            <div
+                id="memoPreview"
+                class="memo-paper"
+            ></div>
 
 
-            <div id="resultsContainer"></div>
+            <div class="page-actions">
+
+                <button
+                    class="btn btn-secondary"
+                    onclick="goToStep(3)"
+                >
+                    ← Editar hallazgos
+                </button>
+
+                <button
+                    class="btn btn-primary"
+                    onclick="goToStep(5)"
+                >
+                    Finalizar
+                    →
+                </button>
+
+            </div>
+
+        </section>
 
 
-            <button
-                class="btn btn-secondary btn-sm"
-                onclick="addResult()"
-            >
-                + Agregar resultado
-            </button>
+        <!-- =================================================
+             STEP 5
+        ================================================== -->
 
-        </div>
-
-
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(3)"
-            >
-                ← Anterior
-            </button>
-
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(5)"
-            >
-                Continuar →
-            </button>
-
-        </div>
-
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- PASO 5 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-5"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                🚨 Hallazgos
-            </h2>
-
-            <p class="section-description">
-                Documentá los hallazgos, riesgos y acciones de mejora.
-            </p>
-
-        </div>
-
-
-        <div id="findingsContainer"></div>
-
-
-        <button
-            class="btn btn-secondary btn-sm"
-            onclick="addFinding()"
+        <section
+            class="page-step"
+            id="step5"
         >
-            + Agregar hallazgo
-        </button>
 
+            <div class="page-header">
 
-        <div class="step-actions">
+                <div>
+                    <span class="eyebrow">
+                        FINALIZAR
+                    </span>
 
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(4)"
-            >
-                ← Anterior
-            </button>
+                    <h2>
+                        Control del memo
+                    </h2>
 
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(6)"
-            >
-                Continuar →
-            </button>
+                    <p>
+                        Verificá la integridad antes de emitirlo.
+                    </p>
+                </div>
 
-        </div>
+            </div>
 
-    </div>
 
-</section>
+            <div class="final-grid">
 
+                <div class="card">
 
-<!-- ===================================================== -->
-<!-- PASO 6 -->
-<!-- ===================================================== -->
+                    <div class="card-header">
+                        <div>
+                            <h3>Estado del documento</h3>
 
-<section
-    id="step-6"
-    class="step-section"
->
+                            <p>
+                                Validaciones de uniformidad.
+                            </p>
+                        </div>
+                    </div>
 
-    <div class="card">
+                    <div
+                        id="validationList"
+                        class="validation-list"
+                    ></div>
 
-        <div class="card-header">
+                </div>
 
-            <h2>
-                📄 Generar Memo
-            </h2>
 
-            <p class="section-description">
-                Construí el borrador a partir de la información validada.
-            </p>
+                <div class="card export-card">
 
-        </div>
+                    <div class="export-icon">
+                        ↓
+                    </div>
 
+                    <h3>
+                        Exportar memo
+                    </h3>
 
-        <div class="style-selector">
+                    <p>
+                        Generá el archivo con el memo,
+                        hallazgos, fuentes y trazabilidad.
+                    </p>
 
-            <label>
-                Estilo de redacción
-            </label>
+                    <button
+                        class="btn btn-primary btn-large"
+                        onclick="exportExcel()"
+                    >
+                        Exportar Excel
+                    </button>
 
-            <select id="memoStyle">
+                </div>
 
-                <option value="ejecutivo">
-                    Ejecutivo
-                </option>
+            </div>
 
-                <option value="detallado">
-                    Detallado
-                </option>
 
-                <option value="memo_excel">
-                    Memo Excel
-                </option>
+            <div class="page-actions">
 
-            </select>
+                <button
+                    class="btn btn-secondary"
+                    onclick="goToStep(4)"
+                >
+                    ← Volver al memo
+                </button>
 
-        </div>
+                <div></div>
 
+            </div>
 
-        <button
-            class="btn btn-primary btn-lg"
-            onclick="generateMemo()"
-        >
-            📄 Generar Memo
-        </button>
+        </section>
 
+    </main>
 
-        <div class="step-actions">
+</div>
 
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(5)"
-            >
-                ← Anterior
-            </button>
 
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(7)"
-            >
-                Continuar →
-            </button>
+<div
+    id="toast"
+    class="toast"
+></div>
 
-        </div>
 
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- PASO 7 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-7"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                👁️ Revisar Memo
-            </h2>
-
-            <p class="section-description">
-                Revisá y editá el borrador antes de exportarlo.
-            </p>
-
-        </div>
-
-
-        <div class="memo-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="improveText()"
-            >
-                ✨ Mejorar redacción
-            </button>
-
-            <button
-                class="btn btn-secondary"
-                onclick="generateMemo()"
-            >
-                🔄 Regenerar
-            </button>
-
-        </div>
-
-
-        <div
-            id="memoPreview"
-            class="memo-preview"
-        ></div>
-
-
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(6)"
-            >
-                ← Anterior
-            </button>
-
-            <button
-                class="btn btn-primary"
-                onclick="goToStep(8)"
-            >
-                Continuar →
-            </button>
-
-        </div>
-
-    </div>
-
-</section>
-
-
-<!-- ===================================================== -->
-<!-- PASO 8 -->
-<!-- ===================================================== -->
-
-<section
-    id="step-8"
-    class="step-section"
->
-
-    <div class="card">
-
-        <div class="card-header">
-
-            <h2>
-                📊 Exportar
-            </h2>
-
-            <p class="section-description">
-                Exportá el papel de trabajo a Excel.
-            </p>
-
-        </div>
-
-
-        <div class="export-info">
-
-            <h4>
-                Hojas incluidas
-            </h4>
-
-            <ul>
-                <li><strong>MEMO:</strong> versión principal.</li>
-                <li><strong>Hallazgos:</strong> detalle completo.</li>
-                <li><strong>Resultados:</strong> resultados cuantitativos.</li>
-                <li><strong>Fuentes:</strong> evidencia utilizada.</li>
-                <li><strong>Trazabilidad:</strong> hechos validados.</li>
-            </ul>
-
-        </div>
-
-
-        <button
-            class="btn btn-primary btn-lg"
-            onclick="exportToExcel()"
-        >
-            📊 Exportar a Excel
-        </button>
-
-
-        <div class="step-actions">
-
-            <button
-                class="btn btn-secondary"
-                onclick="goToStep(7)"
-            >
-                ← Anterior
-            </button>
-
-            <button
-                class="btn btn-success"
-                onclick="newMemo()"
-            >
-                🔄 Nuevo Memo
-            </button>
-
-        </div>
-
-    </div>
-
-</section>
-
-
-</main>
-
-
-<footer class="app-footer">
-
-    <p>
-        Audit Memo Builder v1.1 | Auditoría Interna
-    </p>
-
-</footer>
-
-
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script
+    src="{{ url_for('static', filename='app.js') }}"
+></script>
 
 </body>
 </html>
