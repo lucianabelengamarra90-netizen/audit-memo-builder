@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, jsonify, send_file
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from docx import Document
@@ -11,6 +11,8 @@ from openai import OpenAI
 from io import BytesIO, StringIO
 from tempfile import NamedTemporaryFile
 from datetime import datetime
+from functools import lru_cache
+from math import ceil
 
 import csv
 import os
@@ -22,12 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 
-# ============================================================
-# APP
-# ============================================================
-
 app = Flask(__name__)
-
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 
 
@@ -35,284 +32,121 @@ app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 # CONFIGURACIÓN
 # ============================================================
 
-ALLOWED_EXTENSIONS = {
-    "xlsx",
-    "csv",
-    "docx",
-    "pdf",
-    "txt",
-}
-
-# Máximo que mostramos en pantalla por solapa.
-# IMPORTANTE:
-# esto NO corta el análisis.
+ALLOWED_EXTENSIONS = {"xlsx", "csv", "docx", "pdf", "txt"}
 MAX_DISPLAY_ITEMS_PER_SHEET = 250
-
-# Longitud máxima del texto mostrado por fila.
-MAX_ROW_TEXT_LENGTH = 8000
-
-
-# ============================================================
-# PALABRAS CLAVE DE AUDITORÍA
-# ============================================================
+MAX_ROW_TEXT_LENGTH = 12000
+PROGRESS_LOG_EVERY_ROWS = 100000
 
 KEYWORD_GROUPS = {
-
-    "Hallazgo": [
-        "hallazgo",
-        "hallazgos",
-    ],
-
-    "Conclusión": [
-        "conclusion",
-        "conclusiones",
-    ],
-
-    "Diferencia": [
-        "diferencia",
-        "diferencias",
-        "discrepancia",
-        "discrepancias",
-    ],
-
-    "Observación": [
-        "observacion",
-        "observaciones",
-        "desvio",
-        "desvios",
-    ],
-
-    "Resultado": [
-        "resultado",
-        "resultados",
-        "sin excepcion",
-        "sin diferencias",
-        "sin observaciones",
-    ],
-
-    "Riesgo": [
-        "riesgo",
-        "riesgos",
-    ],
-
-    "Propuesta de mejora": [
-        "propuesta",
-        "propuesta de mejora",
-        "recomendacion",
-        "recomendaciones",
-        "mejora",
-    ],
-
-    "Objetivo": [
-        "objetivo",
-        "objetivos",
-    ],
-
-    "Alcance": [
-        "alcance",
-    ],
-
+    "Hallazgo": ["hallazgo", "hallazgos"],
+    "Conclusión": ["conclusion", "conclusiones"],
+    "Diferencia": ["diferencia", "diferencias", "discrepancia", "discrepancias"],
+    "Observación": ["observacion", "observaciones", "desvio", "desvios"],
+    "Resultado": ["resultado", "resultados", "sin excepcion", "sin diferencias", "sin observaciones"],
+    "Riesgo": ["riesgo", "riesgos"],
+    "Propuesta de mejora": ["propuesta", "propuesta de mejora", "recomendacion", "recomendaciones", "mejora"],
+    "Objetivo": ["objetivo", "objetivos"],
+    "Alcance": ["alcance"],
     "Tarea realizada": [
-        "tarea",
-        "tareas",
-        "tarea realizada",
-        "tareas realizadas",
-        "procedimiento realizado",
-        "procedimientos realizados",
-        "trabajo realizado",
-        "prueba realizada",
-        "pruebas realizadas",
-        "recalculo",
-        "recálculo",
-        "cruce realizado",
-        "cruce",
-        "validacion",
-        "validación",
+        "tarea", "tareas", "tarea realizada", "tareas realizadas",
+        "procedimiento realizado", "procedimientos realizados", "trabajo realizado",
+        "prueba realizada", "pruebas realizadas", "recalculo", "recálculo",
+        "cruce realizado", "cruce", "validacion", "validación"
     ],
+    "Incumplimiento": ["incumplimiento", "incumplimientos"],
+    "Pendiente": ["pendiente", "pendientes"],
+    "Acción": ["accion", "acciones", "plan de accion", "plan de acción"],
+    "Comentario": ["comentario", "comentarios"],
+}
 
-    "Incumplimiento": [
-        "incumplimiento",
-        "incumplimientos",
-    ],
+SECTION_HEADERS = {
+    "objetivo": ("Objetivo", "objetivo"),
+    "alcance": ("Alcance", "alcance"),
+    "trabajo realizado": ("Tarea realizada", "trabajo realizado"),
+    "tareas realizadas": ("Tarea realizada", "tareas realizadas"),
+    "procedimientos realizados": ("Tarea realizada", "procedimientos realizados"),
+    "hallazgos generales": ("Hallazgo", "hallazgos generales"),
+    "hallazgo general": ("Hallazgo", "hallazgo general"),
+    "hallazgos particulares": ("Hallazgo", "hallazgos particulares"),
+    "hallazgos particulares de cada acuerdo": ("Hallazgo", "hallazgos particulares de cada acuerdo"),
+    "conclusiones": ("Conclusión", "conclusiones"),
+    "conclusion": ("Conclusión", "conclusion"),
+    "resultados": ("Resultado", "resultados"),
+    "riesgos": ("Riesgo", "riesgos"),
+    "propuestas de mejora": ("Propuesta de mejora", "propuestas de mejora"),
+}
 
-    "Pendiente": [
-        "pendiente",
-        "pendientes",
-    ],
-
-    "Acción": [
-        "accion",
-        "acciones",
-        "plan de accion",
-        "plan de acción",
-    ],
-
-    "Comentario": [
-        "comentario",
-        "comentarios",
-    ],
+COLUMN_HEADER_CATEGORIES = {
+    "Hallazgo", "Conclusión", "Diferencia", "Observación", "Resultado",
+    "Riesgo", "Propuesta de mejora", "Tarea realizada", "Comentario"
 }
 
 
-# ============================================================
-# HELPERS DE TEXTO
-# ============================================================
-
 def normalize_text(value):
-
     if value is None:
         return ""
-
     text = str(value).strip()
-
     if not text:
         return ""
-
-    text = unicodedata.normalize(
-        "NFD",
-        text
-    )
-
-    text = "".join(
-        char
-        for char in text
-        if unicodedata.category(char) != "Mn"
-    )
-
-    text = text.lower()
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = re.sub(r"\s+", " ", text.lower())
     return text.strip()
 
 
 def clean_text(value):
-
     if value is None:
         return ""
-
-    text = str(value)
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text.strip()
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
 def get_extension(filename):
-
-    if "." not in filename:
-        return ""
-
-    return filename.rsplit(
-        ".",
-        1
-    )[-1].lower()
-
-
-def contains_letters(text):
-
-    if not text:
-        return False
-
-    return any(
-        char.isalpha()
-        for char in text
-    )
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
 def row_to_text(values):
-
-    parts = []
-
-    for value in values:
-
-        text = clean_text(value)
-
-        if text:
-            parts.append(text)
-
+    parts = [clean_text(v) for v in values if clean_text(v)]
     result = " | ".join(parts)
-
-    if len(result) > MAX_ROW_TEXT_LENGTH:
-        result = result[:MAX_ROW_TEXT_LENGTH]
-
-    return result
+    return result[:MAX_ROW_TEXT_LENGTH]
 
 
-# ============================================================
-# PALABRAS CLAVE NORMALIZADAS
-#
-# Se calculan UNA SOLA VEZ.
-# ============================================================
-
-NORMALIZED_KEYWORDS = {}
-
-for category, keywords in KEYWORD_GROUPS.items():
-
-    NORMALIZED_KEYWORDS[category] = []
-
-    for keyword in keywords:
-
-        NORMALIZED_KEYWORDS[
-            category
-        ].append(
-            (
-                normalize_text(keyword),
-                keyword
-            )
-        )
+NORMALIZED_KEYWORDS = {
+    category: [(normalize_text(keyword), keyword) for keyword in keywords]
+    for category, keywords in KEYWORD_GROUPS.items()
+}
 
 
 def detect_categories(text):
-
     normalized = normalize_text(text)
-
     if not normalized:
         return []
-
     matches = []
-
-    for category, keyword_pairs in NORMALIZED_KEYWORDS.items():
-
-        for normalized_keyword, original_keyword in keyword_pairs:
-
-            if (
-                normalized_keyword
-                and normalized_keyword in normalized
-            ):
-
-                matches.append({
-                    "category": category,
-                    "keyword": original_keyword
-                })
-
+    for category, pairs in NORMALIZED_KEYWORDS.items():
+        for normalized_keyword, original_keyword in pairs:
+            if normalized_keyword and normalized_keyword in normalized:
+                matches.append({"category": category, "keyword": original_keyword})
                 break
-
     return matches
 
 
-# ============================================================
-# ITEMS
-# ============================================================
+def detect_section_header(text):
+    normalized = normalize_text(text).strip(" :-–—")
+    if not normalized or len(normalized) > 100:
+        return None
+    for label, (category, keyword) in SECTION_HEADERS.items():
+        if normalized == label or normalized.startswith(label + " "):
+            return {"category": category, "keyword": keyword}
+    return None
 
-def make_item(
-    category,
-    text,
-    filename,
-    origin_type,
-    origin_name="",
-    reference="",
-    keyword=""
-):
 
+def column_letter_from_ref(cell_ref):
+    if not cell_ref:
+        return ""
+    match = re.match(r"([A-Z]+)", cell_ref.upper())
+    return match.group(1) if match else ""
+
+
+def make_item(category, text, filename, origin_type, origin_name="", reference="", keyword=""):
     return {
         "id": str(uuid.uuid4()),
         "category": category,
@@ -327,2289 +161,900 @@ def make_item(
     }
 
 
-def add_unique_item(
-    items,
-    seen,
-    item
-):
-
+def add_unique_item(items, seen, item):
     fingerprint = (
-        item["filename"],
-        item["originName"],
-        item["reference"],
-        item["category"],
-        normalize_text(
-            item["text"]
-        )
+        item.get("filename", ""), item.get("originName", ""),
+        item.get("reference", ""), item.get("category", ""),
+        normalize_text(item.get("text", ""))
     )
-
     if fingerprint in seen:
         return False
-
-    seen.add(
-        fingerprint
-    )
-
-    items.append(
-        item
-    )
-
+    seen.add(fingerprint)
+    items.append(item)
     return True
 
 
-# ============================================================
-# OPENAI
-# ============================================================
-
 def get_openai_client():
-
-    api_key = os.getenv(
-        "OPENAI_API_KEY",
-        ""
-    ).strip()
-
-    if not api_key:
-        return None
-
-    return OpenAI(
-        api_key=api_key
-    )
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    return OpenAI(api_key=api_key) if api_key else None
 
 
-# ============================================================
-# XLSX
-# ============================================================
-
-MAIN_NS = (
-    "http://schemas.openxmlformats.org/"
-    "spreadsheetml/2006/main"
-)
-
-REL_NS = (
-    "http://schemas.openxmlformats.org/"
-    "officeDocument/2006/relationships"
-)
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def qname(namespace, tag):
-
     return f"{{{namespace}}}{tag}"
 
 
-# ============================================================
-# SHARED STRINGS
-#
-# Guardamos:
-# - texto
-# - si contiene keyword
-# - categorías detectadas
-#
-# De esta forma NO analizamos nuevamente cada texto
-# cada vez que aparece en una hoja.
-# ============================================================
-
-def create_shared_strings_db(
-    archive,
-    db_path
-):
-
-    connection = sqlite3.connect(
-        db_path
-    )
-
+def create_shared_strings_index(archive, db_path):
+    connection = sqlite3.connect(db_path)
     cursor = connection.cursor()
+    cursor.execute("PRAGMA journal_mode=OFF")
+    cursor.execute("PRAGMA synchronous=OFF")
+    cursor.execute("PRAGMA temp_store=FILE")
+    cursor.execute("CREATE TABLE IF NOT EXISTS shared_strings (idx INTEGER PRIMARY KEY, value TEXT)")
 
-    cursor.execute(
-        "PRAGMA journal_mode=OFF"
-    )
-
-    cursor.execute(
-        "PRAGMA synchronous=OFF"
-    )
-
-    cursor.execute(
-        "PRAGMA temp_store=MEMORY"
-    )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shared_strings (
-            idx INTEGER PRIMARY KEY,
-            value TEXT,
-            relevant INTEGER DEFAULT 0,
-            categories TEXT DEFAULT '',
-            keywords TEXT DEFAULT ''
-        )
-        """
-    )
-
+    relevant_map = {}
     if "xl/sharedStrings.xml" not in archive.namelist():
-
         connection.commit()
+        return connection, relevant_map, 0
 
-        return connection
-
-    print(
-        "Analizando sharedStrings...",
-        flush=True
-    )
-
+    print("Analizando sharedStrings...", flush=True)
+    batch = []
     index = 0
 
-    batch = []
-
-    with archive.open(
-        "xl/sharedStrings.xml"
-    ) as stream:
-
-        context = ET.iterparse(
-            stream,
-            events=("end",)
-        )
-
-        for _, element in context:
-
-            if element.tag != qname(
-                MAIN_NS,
-                "si"
-            ):
+    with archive.open("xl/sharedStrings.xml") as stream:
+        for _, element in ET.iterparse(stream, events=("end",)):
+            if element.tag != qname(MAIN_NS, "si"):
                 continue
-
             parts = []
-
-            for text_element in element.iter(
-                qname(
-                    MAIN_NS,
-                    "t"
-                )
-            ):
-
+            for text_element in element.iter(qname(MAIN_NS, "t")):
                 if text_element.text:
-                    parts.append(
-                        text_element.text
-                    )
-
-            value = "".join(
-                parts
-            )
-
-            matches = detect_categories(
-                value
-            )
-
-            relevant = 1 if matches else 0
-
-            categories = "|||".join(
-                match["category"]
-                for match in matches
-            )
-
-            keywords = "|||".join(
-                match["keyword"]
-                for match in matches
-            )
-
-            batch.append(
-                (
-                    index,
-                    value,
-                    relevant,
-                    categories,
-                    keywords
-                )
-            )
-
+                    parts.append(text_element.text)
+            value = "".join(parts)
+            matches = detect_categories(value)
+            section = detect_section_header(value)
+            if matches or section:
+                relevant_map[index] = {
+                    "value": value,
+                    "matches": matches,
+                    "section": section,
+                }
+            batch.append((index, value))
             index += 1
-
             if len(batch) >= 10000:
-
-                cursor.executemany(
-                    """
-                    INSERT INTO shared_strings (
-                        idx,
-                        value,
-                        relevant,
-                        categories,
-                        keywords
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    batch
-                )
-
+                cursor.executemany("INSERT INTO shared_strings (idx, value) VALUES (?, ?)", batch)
                 connection.commit()
-
                 batch.clear()
-
             element.clear()
 
     if batch:
-
-        cursor.executemany(
-            """
-            INSERT INTO shared_strings (
-                idx,
-                value,
-                relevant,
-                categories,
-                keywords
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            batch
-        )
-
-    connection.commit()
-
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS
-        idx_shared_relevant
-        ON shared_strings(relevant)
-        """
-    )
-
-    connection.commit()
+        cursor.executemany("INSERT INTO shared_strings (idx, value) VALUES (?, ?)", batch)
+        connection.commit()
 
     print(
-        f"SharedStrings analizados: {index}",
+        f"SharedStrings analizados: {index} | índices relevantes: {len(relevant_map)}",
         flush=True
     )
+    return connection, relevant_map, index
 
-    return connection
 
-
-# ============================================================
-# SOLAPAS DEL XLSX
-# ============================================================
-
-def get_workbook_sheet_paths(
-    archive
-):
-
-    workbook_root = ET.fromstring(
-        archive.read(
-            "xl/workbook.xml"
-        )
-    )
-
-    relationships_root = ET.fromstring(
-        archive.read(
-            "xl/_rels/workbook.xml.rels"
-        )
-    )
-
+def get_workbook_sheet_paths(archive):
+    workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+    relationships_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
     relationships = {}
-
     for relationship in relationships_root:
-
-        relationship_id = relationship.attrib.get(
-            "Id"
-        )
-
-        target = relationship.attrib.get(
-            "Target",
-            ""
-        )
-
+        rel_id = relationship.attrib.get("Id")
+        target = relationship.attrib.get("Target", "")
         if not target:
             continue
-
         if target.startswith("/"):
             target = target.lstrip("/")
-
         elif not target.startswith("xl/"):
             target = "xl/" + target
-
-        target = os.path.normpath(
-            target
-        ).replace(
-            "\\",
-            "/"
-        )
-
-        relationships[
-            relationship_id
-        ] = target
+        target = os.path.normpath(target).replace("\\", "/")
+        relationships[rel_id] = target
 
     sheets = []
-
-    sheets_element = workbook_root.find(
-        qname(
-            MAIN_NS,
-            "sheets"
-        )
-    )
-
+    sheets_element = workbook_root.find(qname(MAIN_NS, "sheets"))
     if sheets_element is None:
         return sheets
-
-    archive_names = set(
-        archive.namelist()
-    )
-
+    archive_names = set(archive.namelist())
     for sheet in sheets_element:
-
-        sheet_name = sheet.attrib.get(
-            "name",
-            "Sin nombre"
-        )
-
-        relationship_id = sheet.attrib.get(
-            qname(
-                REL_NS,
-                "id"
-            )
-        )
-
-        sheet_path = relationships.get(
-            relationship_id
-        )
-
-        if (
-            sheet_path
-            and sheet_path in archive_names
-        ):
-
+        rel_id = sheet.attrib.get(qname(REL_NS, "id"))
+        path = relationships.get(rel_id)
+        if path and path in archive_names:
             sheets.append({
-                "name": sheet_name,
-                "path": sheet_path,
-                "state": sheet.attrib.get(
-                    "state",
-                    "visible"
-                )
+                "name": sheet.attrib.get("name", "Sin nombre"),
+                "path": path,
+                "state": sheet.attrib.get("state", "visible"),
             })
-
     return sheets
 
 
-# ============================================================
-# SHARED STRING LOOKUP
-# ============================================================
-
-def get_shared_string_info(
-    connection,
-    index
-):
-
-    row = connection.execute(
-        """
-        SELECT
-            value,
-            relevant,
-            categories,
-            keywords
-        FROM shared_strings
-        WHERE idx = ?
-        """,
-        (index,)
-    ).fetchone()
-
-    if not row:
-
-        return {
-            "value": "",
-            "relevant": False,
-            "matches": []
-        }
-
-    value = row[0] or ""
-
-    relevant = bool(
-        row[1]
-    )
-
-    categories = (
-        row[2].split("|||")
-        if row[2]
-        else []
-    )
-
-    keywords = (
-        row[3].split("|||")
-        if row[3]
-        else []
-    )
-
-    matches = []
-
-    for category, keyword in zip(
-        categories,
-        keywords
-    ):
-
-        matches.append({
-            "category": category,
-            "keyword": keyword
-        })
-
-    return {
-        "value": value,
-        "relevant": relevant,
-        "matches": matches
-    }
-
-
-# ============================================================
-# CELDAS XLSX
-# ============================================================
-
-def extract_inline_string(
-    cell_element
-):
-
-    inline_string = cell_element.find(
-        qname(
-            MAIN_NS,
-            "is"
-        )
-    )
-
-    if inline_string is None:
+def extract_inline_string(cell):
+    inline = cell.find(qname(MAIN_NS, "is"))
+    if inline is None:
         return ""
-
-    parts = []
-
-    for text_element in inline_string.iter(
-        qname(
-            MAIN_NS,
-            "t"
-        )
-    ):
-
-        if text_element.text:
-            parts.append(
-                text_element.text
-            )
-
     return "".join(
-        parts
+        text.text or ""
+        for text in inline.iter(qname(MAIN_NS, "t"))
     )
 
 
-def get_raw_cell_value(
-    cell_element
-):
-
-    value_element = cell_element.find(
-        qname(
-            MAIN_NS,
-            "v"
-        )
-    )
-
-    if (
-        value_element is None
-        or value_element.text is None
-    ):
-        return ""
-
-    return value_element.text
+def get_raw_cell_value(cell):
+    value = cell.find(qname(MAIN_NS, "v"))
+    return value.text if value is not None and value.text is not None else ""
 
 
-# ============================================================
-# EXTRAER XLSX
-# ============================================================
-
-def extract_xlsx(
-    uploaded_file,
-    filename
-):
-
-    items = []
-
-    seen = set()
-
-    warnings = []
-
-    excel_path = None
-
-    db_path = None
-
+def extract_xlsx(uploaded_file, filename):
+    items, warnings, seen = [], [], set()
+    excel_path = db_path = None
     shared_connection = None
 
     try:
-
-        # ----------------------------------------------------
-        # Guardar archivo temporalmente en disco
-        # ----------------------------------------------------
-
-        with NamedTemporaryFile(
-            suffix=".xlsx",
-            delete=False
-        ) as temp_excel:
-
+        with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_excel:
             excel_path = temp_excel.name
-
             while True:
-
-                chunk = uploaded_file.stream.read(
-                    1024 * 1024
-                )
-
+                chunk = uploaded_file.stream.read(1024 * 1024)
                 if not chunk:
                     break
+                temp_excel.write(chunk)
 
-                temp_excel.write(
-                    chunk
-                )
-
-        # ----------------------------------------------------
-        # SQLite temporal
-        # ----------------------------------------------------
-
-        with NamedTemporaryFile(
-            suffix=".sqlite",
-            delete=False
-        ) as temp_db:
-
+        with NamedTemporaryFile(suffix=".sqlite", delete=False) as temp_db:
             db_path = temp_db.name
 
-        # ----------------------------------------------------
-        # Abrir XLSX
-        # ----------------------------------------------------
+        with zipfile.ZipFile(excel_path, "r") as archive:
+            shared_connection, relevant_map, _ = create_shared_strings_index(archive, db_path)
 
-        with zipfile.ZipFile(
-            excel_path,
-            "r"
-        ) as archive:
+            @lru_cache(maxsize=12000)
+            def get_shared_value(index):
+                row = shared_connection.execute(
+                    "SELECT value FROM shared_strings WHERE idx = ?", (index,)
+                ).fetchone()
+                return row[0] if row else ""
 
-            shared_connection = create_shared_strings_db(
-                archive,
-                db_path
-            )
+            sheets = get_workbook_sheet_paths(archive)
+            print(f"{filename}: {len(sheets)} solapas detectadas.", flush=True)
 
-            sheets = get_workbook_sheet_paths(
-                archive
-            )
-
-            print(
-                f"{filename}: {len(sheets)} solapas detectadas.",
-                flush=True
-            )
-
-            # ------------------------------------------------
-            # Recorrer TODAS las solapas
-            # ------------------------------------------------
-
-            for sheet_index, sheet in enumerate(
-                sheets,
-                start=1
-            ):
-
+            for sheet_index, sheet in enumerate(sheets, start=1):
                 sheet_name = sheet["name"]
-
-                sheet_path = sheet["path"]
-
-                print(
-                    (
-                        f"[{sheet_index}/{len(sheets)}] "
-                        f"Procesando solapa: {sheet_name}"
-                    ),
-                    flush=True
-                )
+                print(f"[{sheet_index}/{len(sheets)}] Procesando solapa: {sheet_name}", flush=True)
 
                 rows_processed = 0
-
                 relevant_rows = 0
-
                 displayed_items = 0
-
                 omitted_items = 0
+                relevant_columns = {}
+                active_section = None
+                blank_rows_in_section = 0
 
-                # --------------------------------------------
-                # La solapa se recorre COMPLETA
-                # --------------------------------------------
-
-                with archive.open(
-                    sheet_path
-                ) as stream:
-
-                    context = ET.iterparse(
-                        stream,
-                        events=("end",)
-                    )
-
-                    for _, element in context:
-
-                        if element.tag != qname(
-                            MAIN_NS,
-                            "row"
-                        ):
+                with archive.open(sheet["path"]) as stream:
+                    for _, row_element in ET.iterparse(stream, events=("end",)):
+                        if row_element.tag != qname(MAIN_NS, "row"):
                             continue
 
                         rows_processed += 1
-
-                        row_number = element.attrib.get(
-                            "r",
-                            ""
-                        )
-
-                        row_values = []
-
-                        row_matches = []
-
-                        row_has_candidate = False
-
-                        # ------------------------------------
-                        # Leer las celdas de la fila
-                        # ------------------------------------
-
-                        for cell in element.findall(
-                            qname(
-                                MAIN_NS,
-                                "c"
-                            )
-                        ):
-
-                            cell_type = cell.attrib.get(
-                                "t"
+                        if rows_processed % PROGRESS_LOG_EVERY_ROWS == 0:
+                            print(
+                                f"  {sheet_name}: {rows_processed:,} filas recorridas...",
+                                flush=True
                             )
 
-                            # --------------------------------
-                            # SHARED STRING
-                            # --------------------------------
+                        row_number = row_element.attrib.get("r", "")
+                        descriptors = []
+                        direct_matches = []
+                        header_candidates = []
+                        nonempty_cells = 0
+                        row_has_relevant_column_value = False
+
+                        for cell in row_element.findall(qname(MAIN_NS, "c")):
+                            cell_type = cell.attrib.get("t")
+                            cell_ref = cell.attrib.get("r", "")
+                            column = column_letter_from_ref(cell_ref)
 
                             if cell_type == "s":
-
-                                raw_value = get_raw_cell_value(
-                                    cell
-                                )
-
-                                if not raw_value:
+                                raw = get_raw_cell_value(cell)
+                                if not raw:
                                     continue
-
                                 try:
-
-                                    shared_index = int(
-                                        raw_value
-                                    )
-
-                                except Exception:
-
+                                    shared_index = int(raw)
+                                except ValueError:
                                     continue
+                                descriptors.append(("s", shared_index))
+                                nonempty_cells += 1
 
-                                info = get_shared_string_info(
-                                    shared_connection,
-                                    shared_index
-                                )
+                                info = relevant_map.get(shared_index)
+                                if info:
+                                    direct_matches.extend(info.get("matches") or [])
+                                    if info.get("section"):
+                                        header_candidates.append((column, info["value"], info["section"]))
+                                    elif info.get("matches"):
+                                        header_candidates.append((column, info["value"], None))
 
-                                value = info["value"]
-
-                                if value:
-                                    row_values.append(
-                                        value
-                                    )
-
-                                if info["relevant"]:
-
-                                    row_has_candidate = True
-
-                                    row_matches.extend(
-                                        info["matches"]
-                                    )
-
-                            # --------------------------------
-                            # INLINE STRING
-                            # --------------------------------
+                                if column in relevant_columns:
+                                    row_has_relevant_column_value = True
 
                             elif cell_type == "inlineStr":
-
-                                value = extract_inline_string(
-                                    cell
-                                )
-
-                                if value:
-                                    row_values.append(
-                                        value
-                                    )
-
-                                matches = detect_categories(
-                                    value
-                                )
-
-                                if matches:
-
-                                    row_has_candidate = True
-
-                                    row_matches.extend(
-                                        matches
-                                    )
-
-                            # --------------------------------
-                            # STR
-                            # --------------------------------
-
-                            elif cell_type == "str":
-
-                                value = get_raw_cell_value(
-                                    cell
-                                )
-
-                                if value:
-                                    row_values.append(
-                                        value
-                                    )
-
-                                matches = detect_categories(
-                                    value
-                                )
-
-                                if matches:
-
-                                    row_has_candidate = True
-
-                                    row_matches.extend(
-                                        matches
-                                    )
-
-                            # --------------------------------
-                            # NUMÉRICOS / FECHAS / BOOLEANOS
-                            # Se guardan para reconstruir contexto
-                            # solamente.
-                            # --------------------------------
+                                value = extract_inline_string(cell)
+                                if not value:
+                                    continue
+                                descriptors.append(("text", value))
+                                nonempty_cells += 1
+                                matches = detect_categories(value)
+                                section = detect_section_header(value)
+                                direct_matches.extend(matches)
+                                if matches or section:
+                                    header_candidates.append((column, value, section))
+                                if column in relevant_columns:
+                                    row_has_relevant_column_value = True
 
                             else:
+                                raw = get_raw_cell_value(cell)
+                                if not raw:
+                                    continue
+                                descriptors.append(("text", raw))
+                                nonempty_cells += 1
+                                if cell_type == "str":
+                                    matches = detect_categories(raw)
+                                    section = detect_section_header(raw)
+                                    direct_matches.extend(matches)
+                                    if matches or section:
+                                        header_candidates.append((column, raw, section))
+                                if column in relevant_columns:
+                                    row_has_relevant_column_value = True
 
-                                value = get_raw_cell_value(
-                                    cell
-                                )
+                        if nonempty_cells == 0:
+                            if active_section:
+                                blank_rows_in_section += 1
+                                if blank_rows_in_section >= 2:
+                                    active_section = None
+                                    blank_rows_in_section = 0
+                            row_element.clear()
+                            continue
+                        blank_rows_in_section = 0
 
-                                if value:
-                                    row_values.append(
-                                        value
-                                    )
+                        new_section = None
+                        if nonempty_cells <= 2:
+                            for _, value, section in header_candidates:
+                                section = section or detect_section_header(value)
+                                if section:
+                                    new_section = section
+                                    break
+                        if new_section:
+                            active_section = new_section
 
-                        # ------------------------------------
-                        # Si no hay candidato, seguimos
-                        # ------------------------------------
+                        if nonempty_cells >= 3:
+                            for column, value, _ in header_candidates:
+                                matches = detect_categories(value)
+                                normalized_value = normalize_text(value)
+                                for match in matches:
+                                    if (
+                                        match["category"] in COLUMN_HEADER_CATEGORIES
+                                        and len(normalized_value) <= 100
+                                    ):
+                                        relevant_columns[column] = match
+                                        break
 
-                        if not row_has_candidate:
+                        effective_matches = list(direct_matches)
+                        if row_has_relevant_column_value:
+                            for _, match in relevant_columns.items():
+                                effective_matches.append(match)
+                        elif active_section and not new_section:
+                            effective_matches.append(active_section)
 
-                            element.clear()
-
+                        if not effective_matches:
+                            row_element.clear()
                             continue
 
-                        # ------------------------------------
-                        # Reconstrucción completa de fila
-                        # ------------------------------------
-
-                        row_text = row_to_text(
-                            row_values
-                        )
-
+                        values = []
+                        for kind, value in descriptors:
+                            values.append(get_shared_value(value) if kind == "s" else value)
+                        row_text = row_to_text(values)
                         if not row_text:
-
-                            element.clear()
-
+                            row_element.clear()
                             continue
 
                         relevant_rows += 1
-
-                        # ------------------------------------
-                        # Eliminar categorías duplicadas
-                        # dentro de la misma fila
-                        # ------------------------------------
-
                         unique_matches = []
-
-                        seen_categories = set()
-
-                        for match in row_matches:
-
-                            key = (
-                                match["category"],
-                                match["keyword"]
-                            )
-
-                            if key in seen_categories:
-                                continue
-
-                            seen_categories.add(
-                                key
-                            )
-
-                            unique_matches.append(
-                                match
-                            )
-
-                        # ------------------------------------
-                        # Guardar para frontend
-                        # ------------------------------------
+                        seen_match_keys = set()
+                        for match in effective_matches:
+                            key = (match.get("category", ""), match.get("keyword", ""))
+                            if key not in seen_match_keys:
+                                seen_match_keys.add(key)
+                                unique_matches.append(match)
 
                         for match in unique_matches:
-
-                            if (
-                                displayed_items
-                                >= MAX_DISPLAY_ITEMS_PER_SHEET
-                            ):
-
+                            if displayed_items >= MAX_DISPLAY_ITEMS_PER_SHEET:
                                 omitted_items += 1
-
                                 continue
-
                             item = make_item(
-                                category=match[
-                                    "category"
-                                ],
-                                text=row_text,
-                                filename=filename,
-                                origin_type="Excel",
-                                origin_name=sheet_name,
-                                reference=(
-                                    f"Fila {row_number}"
-                                    if row_number
-                                    else ""
-                                ),
-                                keyword=match[
-                                    "keyword"
-                                ]
+                                match.get("category", "Información"),
+                                row_text,
+                                filename,
+                                "Excel",
+                                sheet_name,
+                                f"Fila {row_number}" if row_number else "",
+                                match.get("keyword", ""),
                             )
-
-                            added = add_unique_item(
-                                items,
-                                seen,
-                                item
-                            )
-
-                            if added:
-
+                            if add_unique_item(items, seen, item):
                                 displayed_items += 1
 
-                        element.clear()
-
-                # --------------------------------------------
-                # Log de avance
-                # --------------------------------------------
+                        row_element.clear()
 
                 print(
-                    (
-                        f"Solapa finalizada: {sheet_name} | "
-                        f"Filas: {rows_processed} | "
-                        f"Filas relevantes: {relevant_rows} | "
-                        f"Mostradas: {displayed_items}"
-                    ),
+                    f"Solapa finalizada: {sheet_name} | Filas: {rows_processed} | "
+                    f"Filas relevantes: {relevant_rows} | Mostradas: {displayed_items}",
                     flush=True
                 )
-
-                if omitted_items > 0:
-
+                if omitted_items:
                     warnings.append(
-                        (
-                            f"{filename} · {sheet_name}: "
-                            f"se detectaron más elementos de los "
-                            f"{MAX_DISPLAY_ITEMS_PER_SHEET} mostrados. "
-                            "El análisis recorrió la solapa completa, "
-                            "pero se limitó la cantidad visualizada "
-                            "para evitar sobrecargar el navegador."
-                        )
+                        f"{filename} · {sheet_name}: se analizaron todas las filas, pero se muestran "
+                        f"hasta {MAX_DISPLAY_ITEMS_PER_SHEET} elementos para no sobrecargar la pantalla."
                     )
 
     except zipfile.BadZipFile:
-
-        raise ValueError(
-            "El archivo Excel no es válido o está dañado."
-        )
-
+        raise ValueError("El archivo Excel no es válido o está dañado.")
     finally:
-
         if shared_connection:
-
             try:
                 shared_connection.close()
             except Exception:
                 pass
-
-        for path in (
-            excel_path,
-            db_path
-        ):
-
-            if not path:
-                continue
-
-            try:
-                os.remove(
-                    path
-                )
-            except Exception:
-                pass
+        for path in (excel_path, db_path):
+            if path:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
     return items, warnings
 
 
-# ============================================================
-# CSV
-# ============================================================
-
-def extract_csv(
-    uploaded_file,
-    filename
-):
-
-    items = []
-
-    seen = set()
-
+def extract_csv(uploaded_file, filename):
+    items, seen = [], set()
     raw = uploaded_file.read()
-
     try:
-
-        text = raw.decode(
-            "utf-8-sig"
-        )
-
+        text = raw.decode("utf-8-sig")
     except Exception:
-
-        text = raw.decode(
-            "latin1",
-            errors="replace"
-        )
-
-    stream = StringIO(
-        text
-    )
-
-    sample = text[:5000]
-
+        text = raw.decode("latin1", errors="replace")
+    stream = StringIO(text)
     try:
-
-        dialect = csv.Sniffer().sniff(
-            sample,
-            delimiters=",;\t|"
-        )
-
+        dialect = csv.Sniffer().sniff(text[:5000], delimiters=",;\t|")
     except Exception:
-
         dialect = csv.excel
-
-    reader = csv.reader(
-        stream,
-        dialect
-    )
-
-    for row_number, row in enumerate(
-        reader,
-        start=1
-    ):
-
-        row_text = row_to_text(
-            row
-        )
-
+    for row_number, row in enumerate(csv.reader(stream, dialect), start=1):
+        row_text = row_to_text(row)
         if not row_text:
             continue
-
-        if not contains_letters(
-            row_text
-        ):
-            continue
-
-        matches = detect_categories(
-            row_text
-        )
-
-        for match in matches:
-
-            item = make_item(
-                category=match[
-                    "category"
-                ],
-                text=row_text,
-                filename=filename,
-                origin_type="CSV",
-                origin_name="CSV",
-                reference=f"Fila {row_number}",
-                keyword=match[
-                    "keyword"
-                ]
-            )
-
-            add_unique_item(
-                items,
-                seen,
-                item
-            )
-
+        for match in detect_categories(row_text):
+            add_unique_item(items, seen, make_item(
+                match["category"], row_text, filename, "CSV", "CSV",
+                f"Fila {row_number}", match["keyword"]
+            ))
     return items
 
 
-# ============================================================
-# WORD
-# ============================================================
-
-def extract_docx(
-    uploaded_file,
-    filename
-):
-
-    items = []
-
-    seen = set()
-
-    document = Document(
-        BytesIO(
-            uploaded_file.read()
-        )
-    )
-
-    for paragraph_number, paragraph in enumerate(
-        document.paragraphs,
-        start=1
-    ):
-
-        text = clean_text(
-            paragraph.text
-        )
-
+def extract_docx(uploaded_file, filename):
+    items, seen = [], set()
+    document = Document(BytesIO(uploaded_file.read()))
+    for number, paragraph in enumerate(document.paragraphs, start=1):
+        text = clean_text(paragraph.text)
         if not text:
             continue
-
-        matches = detect_categories(
-            text
-        )
-
-        for match in matches:
-
-            item = make_item(
-                category=match[
-                    "category"
-                ],
-                text=text,
-                filename=filename,
-                origin_type="Word",
-                origin_name="Documento",
-                reference=(
-                    f"Párrafo {paragraph_number}"
-                ),
-                keyword=match[
-                    "keyword"
-                ]
-            )
-
-            add_unique_item(
-                items,
-                seen,
-                item
-            )
-
-    for table_number, table in enumerate(
-        document.tables,
-        start=1
-    ):
-
-        for row_number, row in enumerate(
-            table.rows,
-            start=1
-        ):
-
-            values = [
-                cell.text
-                for cell in row.cells
-            ]
-
-            row_text = row_to_text(
-                values
-            )
-
-            if not row_text:
+        for match in detect_categories(text):
+            add_unique_item(items, seen, make_item(
+                match["category"], text, filename, "Word", "Documento",
+                f"Párrafo {number}", match["keyword"]
+            ))
+    for table_number, table in enumerate(document.tables, start=1):
+        for row_number, row in enumerate(table.rows, start=1):
+            text = row_to_text([cell.text for cell in row.cells])
+            if not text:
                 continue
-
-            matches = detect_categories(
-                row_text
-            )
-
-            for match in matches:
-
-                item = make_item(
-                    category=match[
-                        "category"
-                    ],
-                    text=row_text,
-                    filename=filename,
-                    origin_type="Word",
-                    origin_name=(
-                        f"Tabla {table_number}"
-                    ),
-                    reference=(
-                        f"Fila {row_number}"
-                    ),
-                    keyword=match[
-                        "keyword"
-                    ]
-                )
-
-                add_unique_item(
-                    items,
-                    seen,
-                    item
-                )
-
+            for match in detect_categories(text):
+                add_unique_item(items, seen, make_item(
+                    match["category"], text, filename, "Word", f"Tabla {table_number}",
+                    f"Fila {row_number}", match["keyword"]
+                ))
     return items
 
 
-# ============================================================
-# PDF
-# ============================================================
-
-def extract_pdf(
-    uploaded_file,
-    filename
-):
-
-    items = []
-
-    seen = set()
-
-    reader = PdfReader(
-        BytesIO(
-            uploaded_file.read()
-        )
-    )
-
+def extract_pdf(uploaded_file, filename):
+    items, seen = [], set()
+    reader = PdfReader(BytesIO(uploaded_file.read()))
     pages_with_text = 0
-
-    for page_number, page in enumerate(
-        reader.pages,
-        start=1
-    ):
-
+    for page_number, page in enumerate(reader.pages, start=1):
         try:
-
-            page_text = (
-                page.extract_text()
-                or ""
-            )
-
+            page_text = page.extract_text() or ""
         except Exception:
-
             page_text = ""
-
         if not page_text.strip():
             continue
-
         pages_with_text += 1
-
-        lines = [
-            clean_text(line)
-            for line in page_text.splitlines()
-            if clean_text(line)
-        ]
-
-        for index, line in enumerate(
-            lines
-        ):
-
-            matches = detect_categories(
-                line
-            )
-
+        lines = [clean_text(line) for line in page_text.splitlines() if clean_text(line)]
+        for idx, line in enumerate(lines):
+            matches = detect_categories(line)
             if not matches:
                 continue
-
-            start = max(
-                0,
-                index - 1
-            )
-
-            end = min(
-                len(lines),
-                index + 3
-            )
-
-            context = " ".join(
-                lines[start:end]
-            )
-
+            context = " ".join(lines[max(0, idx - 1): min(len(lines), idx + 3)])
             for match in matches:
-
-                item = make_item(
-                    category=match[
-                        "category"
-                    ],
-                    text=context,
-                    filename=filename,
-                    origin_type="PDF",
-                    origin_name=(
-                        f"Página {page_number}"
-                    ),
-                    reference=(
-                        f"Página {page_number}"
-                    ),
-                    keyword=match[
-                        "keyword"
-                    ]
-                )
-
-                add_unique_item(
-                    items,
-                    seen,
-                    item
-                )
-
+                add_unique_item(items, seen, make_item(
+                    match["category"], context, filename, "PDF", f"Página {page_number}",
+                    f"Página {page_number}", match["keyword"]
+                ))
     if pages_with_text == 0:
-
-        items.append(
-            make_item(
-                category="Advertencia",
-                text=(
-                    "No se pudo extraer texto del PDF. "
-                    "El documento puede estar escaneado."
-                ),
-                filename=filename,
-                origin_type="PDF",
-                origin_name="Documento"
-            )
-        )
-
+        items.append(make_item(
+            "Advertencia", "No se pudo extraer texto del PDF. El documento puede estar escaneado.",
+            filename, "PDF", "Documento"
+        ))
     return items
 
 
-# ============================================================
-# TXT
-# ============================================================
-
-def extract_txt(
-    uploaded_file,
-    filename
-):
-
-    items = []
-
-    seen = set()
-
+def extract_txt(uploaded_file, filename):
+    items, seen = [], set()
     raw = uploaded_file.read()
-
     text = None
-
-    for encoding in (
-        "utf-8-sig",
-        "utf-8",
-        "latin1"
-    ):
-
+    for encoding in ("utf-8-sig", "utf-8", "latin1"):
         try:
-
-            text = raw.decode(
-                encoding
-            )
-
+            text = raw.decode(encoding)
             break
-
         except Exception:
             pass
-
     if text is None:
         return items
-
-    lines = [
-        clean_text(line)
-        for line in text.splitlines()
-        if clean_text(line)
-    ]
-
-    for line_number, line in enumerate(
-        lines,
-        start=1
-    ):
-
-        matches = detect_categories(
-            line
-        )
-
-        for match in matches:
-
-            item = make_item(
-                category=match[
-                    "category"
-                ],
-                text=line,
-                filename=filename,
-                origin_type="TXT",
-                origin_name="Documento",
-                reference=(
-                    f"Línea {line_number}"
-                ),
-                keyword=match[
-                    "keyword"
-                ]
-            )
-
-            add_unique_item(
-                items,
-                seen,
-                item
-            )
-
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        line = clean_text(line)
+        if not line:
+            continue
+        for match in detect_categories(line):
+            add_unique_item(items, seen, make_item(
+                match["category"], line, filename, "TXT", "Documento",
+                f"Línea {line_number}", match["keyword"]
+            ))
     return items
 
 
-# ============================================================
-# TEXTO MANUAL
-# ============================================================
-
-def extract_free_text(
-    text
-):
-
-    items = []
-
-    seen = set()
-
-    lines = [
-        clean_text(line)
-        for line in text.splitlines()
-        if clean_text(line)
-    ]
-
-    for line_number, line in enumerate(
-        lines,
-        start=1
-    ):
-
-        matches = detect_categories(
-            line
-        )
-
-        for match in matches:
-
-            item = make_item(
-                category=match[
-                    "category"
-                ],
-                text=line,
-                filename="Texto ingresado",
-                origin_type="Texto",
-                origin_name="Ingreso manual",
-                reference=(
-                    f"Línea {line_number}"
-                ),
-                keyword=match[
-                    "keyword"
-                ]
-            )
-
-            add_unique_item(
-                items,
-                seen,
-                item
-            )
-
+def extract_free_text(text):
+    items, seen = [], set()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        line = clean_text(line)
+        if not line:
+            continue
+        for match in detect_categories(line):
+            add_unique_item(items, seen, make_item(
+                match["category"], line, "Texto ingresado", "Texto", "Ingreso manual",
+                f"Línea {line_number}", match["keyword"]
+            ))
     return items
 
-
-# ============================================================
-# HOME
-# ============================================================
 
 @app.route("/")
 def index():
+    return render_template("index.html")
 
-    return render_template(
-        "index.html"
-    )
-
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.route("/health")
 def health():
-
-    openai_configured = bool(
-        os.getenv(
-            "OPENAI_API_KEY",
-            ""
-        ).strip()
-    )
-
     return jsonify({
         "status": "ok",
-        "openaiConfigured": openai_configured
+        "openaiConfigured": bool(os.getenv("OPENAI_API_KEY", "").strip())
     })
 
 
-# ============================================================
-# EXTRAER INFORMACIÓN
-# ============================================================
-
-@app.route(
-    "/extract",
-    methods=["POST"]
-)
+@app.route("/extract", methods=["POST"])
 def extract_information():
-
-    files = request.files.getlist(
-        "files"
-    )
-
-    free_text = request.form.get(
-        "freeText",
-        ""
-    ).strip()
-
+    files = request.files.getlist("files")
+    free_text = request.form.get("freeText", "").strip()
     if not files and not free_text:
+        return jsonify({"error": "Cargá al menos un papel de trabajo o ingresá texto adicional."}), 400
 
-        return jsonify({
-            "error": (
-                "Cargá al menos un papel de trabajo "
-                "o ingresá texto adicional."
-            )
-        }), 400
-
-    extracted_items = []
-
-    errors = []
-
-    warnings = []
-
+    extracted_items, errors, warnings = [], [], []
     for uploaded_file in files:
-
-        filename = (
-            uploaded_file.filename
-            or "archivo_sin_nombre"
-        )
-
-        extension = get_extension(
-            filename
-        )
-
+        filename = uploaded_file.filename or "archivo_sin_nombre"
+        extension = get_extension(filename)
         if extension not in ALLOWED_EXTENSIONS:
-
-            errors.append(
-                f"{filename}: formato no admitido."
-            )
-
+            errors.append(f"{filename}: formato no admitido.")
             continue
-
-        print(
-            f"Iniciando extracción: {filename}",
-            flush=True
-        )
-
+        print(f"Iniciando extracción: {filename}", flush=True)
         try:
-
             if extension == "xlsx":
-
-                (
-                    excel_items,
-                    excel_warnings
-                ) = extract_xlsx(
-                    uploaded_file,
-                    filename
-                )
-
-                extracted_items.extend(
-                    excel_items
-                )
-
-                warnings.extend(
-                    excel_warnings
-                )
-
+                excel_items, excel_warnings = extract_xlsx(uploaded_file, filename)
+                extracted_items.extend(excel_items)
+                warnings.extend(excel_warnings)
             elif extension == "csv":
-
-                extracted_items.extend(
-                    extract_csv(
-                        uploaded_file,
-                        filename
-                    )
-                )
-
+                extracted_items.extend(extract_csv(uploaded_file, filename))
             elif extension == "docx":
-
-                extracted_items.extend(
-                    extract_docx(
-                        uploaded_file,
-                        filename
-                    )
-                )
-
+                extracted_items.extend(extract_docx(uploaded_file, filename))
             elif extension == "pdf":
-
-                extracted_items.extend(
-                    extract_pdf(
-                        uploaded_file,
-                        filename
-                    )
-                )
-
+                extracted_items.extend(extract_pdf(uploaded_file, filename))
             elif extension == "txt":
-
-                extracted_items.extend(
-                    extract_txt(
-                        uploaded_file,
-                        filename
-                    )
-                )
-
+                extracted_items.extend(extract_txt(uploaded_file, filename))
         except Exception as exc:
-
-            print(
-                (
-                    f"Error procesando {filename}: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-                flush=True
-            )
-
-            errors.append(
-                (
-                    f"{filename}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            )
-
-        print(
-            f"Extracción finalizada: {filename}",
-            flush=True
-        )
+            print(f"Error procesando {filename}: {type(exc).__name__}: {exc}", flush=True)
+            errors.append(f"{filename}: {type(exc).__name__}: {exc}")
+        print(f"Extracción finalizada: {filename}", flush=True)
 
     if free_text:
-
-        extracted_items.extend(
-            extract_free_text(
-                free_text
-            )
-        )
+        extracted_items.extend(extract_free_text(free_text))
 
     return jsonify({
         "items": extracted_items,
-        "count": len(
-            extracted_items
-        ),
+        "count": len(extracted_items),
         "errors": errors,
         "warnings": warnings,
         "message": (
-            f"Se identificaron "
-            f"{len(extracted_items)} "
-            "elementos potencialmente relevantes. "
+            f"Se identificaron {len(extracted_items)} elementos potencialmente relevantes. "
             "Revisalos antes de incorporarlos al memo."
         )
     })
 
 
-# Compatibilidad con versión anterior
-@app.route(
-    "/analyze",
-    methods=["POST"]
-)
+@app.route("/analyze", methods=["POST"])
 def analyze_alias():
-
     return extract_information()
 
 
-# ============================================================
-# IA
-# ============================================================
-
-@app.route(
-    "/improve-text",
-    methods=["POST"]
-)
+@app.route("/improve-text", methods=["POST"])
 def improve_text():
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    text = clean_text(
-        data.get(
-            "text",
-            ""
-        )
-    )
-
-    field_type = clean_text(
-        data.get(
-            "fieldType",
-            "Texto de auditoría"
-        )
-    )
-
+    data = request.get_json(silent=True) or {}
+    text = clean_text(data.get("text", ""))
+    field_type = clean_text(data.get("fieldType", "Texto de auditoría"))
     if not text:
-
-        return jsonify({
-            "error": (
-                "Primero escribí una idea "
-                "o texto para mejorar."
-            )
-        }), 400
+        return jsonify({"error": "Primero escribí una idea o texto para mejorar."}), 400
 
     openai_client = get_openai_client()
-
     if not openai_client:
-
-        return jsonify({
-            "error": (
-                "Render no está entregando "
-                "OPENAI_API_KEY al proceso."
-            )
-        }), 500
+        return jsonify({"error": "Render no está entregando OPENAI_API_KEY al proceso."}), 500
 
     instructions = """
-Actuá como especialista en redacción de Auditoría Interna,
-con experiencia en procesos corporativos y retail mayorista.
-
-Tu función es mejorar exclusivamente la redacción aportada
-por el auditor.
-
-No realices la auditoría.
-No inventes hechos ni evidencia.
-
-REGLAS:
-
-- No inventes importes.
-- No inventes cantidades.
-- No inventes fechas.
-- No inventes períodos.
-- No inventes proveedores.
-- No inventes clientes.
-- No inventes personas.
-- No inventes sistemas.
-- No inventes documentos.
-- No inventes controles.
-- No inventes muestras.
-- No inventes resultados.
-- No inventes hallazgos.
-- No inventes evidencia.
-- No inventes conclusiones.
-- No atribuyas causas no informadas.
-
-Conservá el significado original.
-
-Utilizá lenguaje claro, técnico, profesional y corporativo.
-
-OBJETIVO:
-Mejorá y completá conceptualmente el objetivo sin inventar
-procedimientos específicos.
-
-ALCANCE:
-Ordená únicamente la información suministrada.
-
-SITUACIÓN OBSERVADA:
-Describí objetivamente los hechos aportados.
-
-RIESGO:
-Mejorá la formulación del riesgo sin inventar impactos concretos.
-
-PROPUESTA DE MEJORA:
-Profesionalizá la recomendación orientándola a fortalecer
-controles, trazabilidad y eficiencia sin modificar
-la intención original.
-
+Actuá como especialista en redacción de Auditoría Interna, con experiencia en retail mayorista.
+Mejorá exclusivamente el texto aportado por el auditor. No realices la auditoría ni inventes hechos.
+No inventes importes, cantidades, fechas, períodos, proveedores, clientes, personas, sistemas,
+documentos, controles, muestras, resultados, hallazgos, evidencia, causas ni conclusiones.
+Conservá el significado original. Usá lenguaje claro, técnico, profesional y corporativo.
+OBJETIVO: profesionalizá el propósito sin inventar procedimientos.
+ALCANCE: ordená únicamente la información suministrada.
+SITUACIÓN OBSERVADA: describí objetivamente los hechos aportados.
+RIESGO: mejorá la formulación sin inventar impactos específicos.
+PROPUESTA DE MEJORA: fortalecé la redacción orientándola a controles, trazabilidad y eficiencia,
+sin alterar la intención original.
 Devolvé solamente el texto final.
 """
-
-    prompt = f"""
-TIPO DE CAMPO:
-{field_type}
-
-TEXTO DEL AUDITOR:
-{text}
-
-Mejorá la redacción respetando estrictamente las reglas.
-"""
+    prompt = f"TIPO DE CAMPO:\n{field_type}\n\nTEXTO DEL AUDITOR:\n{text}"
 
     try:
-
         response = openai_client.responses.create(
             model="gpt-5.6-luna",
             instructions=instructions,
-            input=prompt
+            input=prompt,
         )
-
-        improved = clean_text(
-            response.output_text
-        )
-
+        improved = clean_text(response.output_text)
         if not improved:
-
-            return jsonify({
-                "error": (
-                    "La IA no devolvió una redacción."
-                )
-            }), 500
-
-        return jsonify({
-            "original": text,
-            "improved": improved
-        })
-
+            return jsonify({"error": "La IA no devolvió una redacción."}), 500
+        return jsonify({"original": text, "improved": improved})
     except Exception as exc:
-
-        print(
-            (
-                "Error OpenAI /improve-text: "
-                f"{type(exc).__name__}: {exc}"
-            ),
-            flush=True
-        )
-
+        print(f"Error OpenAI /improve-text: {type(exc).__name__}: {exc}", flush=True)
         return jsonify({
-            "error": (
-                "La solicitud a OpenAI no pudo completarse. "
-                "Revisá el log de Render."
-            )
+            "error": "La solicitud a OpenAI no pudo completarse. Revisá el log de Render."
         }), 500
 
 
-# ============================================================
-# EXPORTACIÓN
-# ============================================================
+NAVY = "17365D"
+BLUE = "1F4E78"
+MID_BLUE = "5B9BD5"
+LIGHT_BLUE = "D9EAF7"
+VERY_LIGHT_BLUE = "F3F7FB"
+TEXT_COLOR = "1F2937"
+MUTED = "667085"
+BORDER_COLOR = "D0D7DE"
+WHITE = "FFFFFF"
+RED_FILL = "FDECEC"
+RED_FONT = "B42318"
+YELLOW_FILL = "FFF4CC"
+YELLOW_FONT = "8A6200"
+GREEN_FILL = "EAF6EA"
+GREEN_FONT = "2E7D32"
 
-def format_header(cell):
-
-    cell.fill = PatternFill(
-        "solid",
-        fgColor="17365D"
-    )
-
-    cell.font = Font(
-        color="FFFFFF",
-        bold=True
-    )
-
-    cell.alignment = Alignment(
-        horizontal="center",
-        vertical="center",
-        wrap_text=True
-    )
-
-
-def auto_width(
-    worksheet
-):
-
-    for column in worksheet.columns:
-
-        max_length = 0
-
-        column_letter = get_column_letter(
-            column[0].column
-        )
-
-        for cell in column:
-
-            cell.alignment = Alignment(
-                vertical="top",
-                wrap_text=True
-            )
-
-            if cell.value is None:
-                continue
-
-            length = len(
-                str(cell.value)
-            )
-
-            max_length = max(
-                max_length,
-                min(
-                    length,
-                    70
-                )
-            )
-
-        worksheet.column_dimensions[
-            column_letter
-        ].width = max(
-            12,
-            min(
-                max_length + 2,
-                70
-            )
-        )
-
-
-@app.route(
-    "/export-excel",
-    methods=["POST"]
+THIN_BORDER = Border(
+    left=Side(style="thin", color=BORDER_COLOR),
+    right=Side(style="thin", color=BORDER_COLOR),
+    top=Side(style="thin", color=BORDER_COLOR),
+    bottom=Side(style="thin", color=BORDER_COLOR),
 )
-def export_excel():
 
-    payload = request.get_json(
-        silent=True
-    ) or {}
 
-    memo = payload.get(
-        "memo",
-        {}
-    )
+def set_cell(cell, value=None, *, bold=False, color=TEXT_COLOR, fill=None,
+             size=10, align="left", valign="top", wrap=True, border=None):
+    if value is not None:
+        cell.value = value
+    cell.font = Font(name="Aptos", size=size, bold=bold, color=color)
+    if fill:
+        cell.fill = PatternFill("solid", fgColor=fill)
+    cell.alignment = Alignment(horizontal=align, vertical=valign, wrap_text=wrap)
+    if border:
+        cell.border = border
 
-    general = memo.get(
-        "general",
-        {}
-    )
 
-    findings = memo.get(
-        "findings",
-        []
-    )
+def merge_section_title(ws, row, title, start_col=1, end_col=8):
+    ws.merge_cells(start_row=row, start_column=start_col, end_row=row, end_column=end_col)
+    cell = ws.cell(row=row, column=start_col)
+    set_cell(cell, title, bold=True, color=WHITE, fill=BLUE, size=11, valign="center")
+    ws.row_dimensions[row].height = 24
+    return row + 1
 
-    sources = memo.get(
-        "sources",
-        []
-    )
 
-    extracted = memo.get(
-        "extracted",
-        []
-    )
+def write_merged_text(ws, row, text, start_col=1, end_col=8, min_height=34):
+    ws.merge_cells(start_row=row, start_column=start_col, end_row=row, end_column=end_col)
+    cell = ws.cell(row=row, column=start_col)
+    set_cell(cell, text or "", color=TEXT_COLOR, fill=WHITE, size=10, border=THIN_BORDER)
+    approx_lines = max(1, ceil(len(str(text or "")) / 110))
+    ws.row_dimensions[row].height = max(min_height, min(120, approx_lines * 17))
+    return row + 1
 
-    workbook = Workbook()
 
-    # ========================================================
-    # MEMO
-    # ========================================================
+def included_extracted(extracted, categories=None):
+    result = []
+    for item in extracted:
+        if not item.get("included"):
+            continue
+        if categories is not None and item.get("category") not in categories:
+            continue
+        result.append(item)
+    return result
 
-    ws = workbook.active
 
-    ws.title = "Memo"
+def unique_texts(items):
+    seen = set()
+    result = []
+    for item in items:
+        text = clean_text(item.get("text", ""))
+        key = normalize_text(text)
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
 
-    ws.merge_cells(
-        "A1:F1"
-    )
 
-    ws["A1"] = "AUDITORÍA INTERNA"
+def severity_style(severity):
+    value = normalize_text(severity)
+    if value == "alta":
+        return RED_FILL, RED_FONT
+    if value == "baja":
+        return GREEN_FILL, GREEN_FONT
+    return YELLOW_FILL, YELLOW_FONT
 
-    ws["A1"].fill = PatternFill(
-        "solid",
-        fgColor="17365D"
-    )
 
-    ws["A1"].font = Font(
-        color="FFFFFF",
-        bold=True,
-        size=14
-    )
+def style_sheet_base(ws):
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = None
 
-    ws["A1"].alignment = Alignment(
-        horizontal="center"
-    )
 
-    row = 3
+def build_memo_sheet(ws, general, findings, extracted):
+    style_sheet_base(ws)
+    ws.sheet_properties.tabColor = NAVY
+    widths = {"A": 6, "B": 24, "C": 40, "D": 32, "E": 34, "F": 19, "G": 13, "H": 17}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
 
-    general_rows = [
-        (
-            "Auditoría",
-            general.get(
-                "title",
-                ""
-            )
-        ),
-        (
-            "Área",
-            general.get(
-                "area",
-                ""
-            )
-        ),
-        (
-            "Proceso",
-            general.get(
-                "process",
-                ""
-            )
-        ),
-        (
-            "Período",
-            general.get(
-                "period",
-                ""
-            )
-        ),
-        (
-            "Auditor",
-            general.get(
-                "auditor",
-                ""
-            )
-        ),
-        (
-            "Objetivo",
-            general.get(
-                "objective",
-                ""
-            )
-        ),
-        (
-            "Alcance",
-            general.get(
-                "scope",
-                ""
-            )
-        ),
+    ws.merge_cells("A1:H2")
+    title = clean_text(general.get("title", "")) or "Memo de Auditoría"
+    set_cell(ws["A1"], f"MEMO – {title.upper()}", bold=True, color=WHITE, fill=NAVY,
+             size=16, align="center", valign="center")
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 24
+
+    metadata = [
+        ("Área", general.get("area", ""), "Período", general.get("period", "")),
+        ("Proceso", general.get("process", ""), "Auditor", general.get("auditor", "")),
     ]
-
-    for label, value in general_rows:
-
-        ws.cell(
-            row=row,
-            column=1,
-            value=label
-        )
-
-        ws.cell(
-            row=row,
-            column=1
-        ).font = Font(
-            bold=True,
-            color="17365D"
-        )
-
-        ws.merge_cells(
-            start_row=row,
-            start_column=2,
-            end_row=row,
-            end_column=6
-        )
-
-        ws.cell(
-            row=row,
-            column=2,
-            value=value
-        )
-
+    row = 4
+    for left_label, left_value, right_label, right_value in metadata:
+        set_cell(ws.cell(row, 1), left_label, bold=True, color=NAVY, fill=LIGHT_BLUE, border=THIN_BORDER)
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        set_cell(ws.cell(row, 2), left_value or "", border=THIN_BORDER)
+        set_cell(ws.cell(row, 5), right_label, bold=True, color=NAVY, fill=LIGHT_BLUE, border=THIN_BORDER)
+        ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=8)
+        set_cell(ws.cell(row, 6), right_value or "", border=THIN_BORDER)
+        ws.row_dimensions[row].height = 23
         row += 1
 
-    row += 2
+    row += 1
+    row = merge_section_title(ws, row, "Objetivo")
+    row = write_merged_text(ws, row, general.get("objective", ""))
+    row += 1
 
-    for index, finding in enumerate(
-        findings,
-        start=1
-    ):
-
-        ws.merge_cells(
-            start_row=row,
-            start_column=1,
-            end_row=row,
-            end_column=6
-        )
-
-        ws.cell(
-            row=row,
-            column=1,
-            value=(
-                f"HALLAZGO {index:02d} - "
-                f"{finding.get('title', '')}"
-            )
-        )
-
-        ws.cell(
-            row=row,
-            column=1
-        ).fill = PatternFill(
-            "solid",
-            fgColor="EAF2F8"
-        )
-
-        ws.cell(
-            row=row,
-            column=1
-        ).font = Font(
-            bold=True,
-            color="17365D"
-        )
-
+    if clean_text(general.get("scope", "")):
+        row = merge_section_title(ws, row, "Alcance")
+        row = write_merged_text(ws, row, general.get("scope", ""))
         row += 1
 
-        details = [
-            (
-                "Situación observada",
-                finding.get(
-                    "situation",
-                    ""
-                )
-            ),
-            (
-                "Riesgo",
-                finding.get(
-                    "risk",
-                    ""
-                )
-            ),
-            (
-                "Propuesta de mejora",
-                finding.get(
-                    "proposal",
-                    ""
-                )
-            ),
-            (
-                "Área responsable",
-                finding.get(
-                    "responsibleArea",
-                    ""
-                )
-            ),
-            (
-                "Criticidad",
-                finding.get(
-                    "severity",
-                    ""
-                )
-            ),
-            (
-                "Estado",
-                finding.get(
-                    "status",
-                    ""
-                )
-            ),
-            (
-                "Fecha compromiso",
-                finding.get(
-                    "targetDate",
-                    ""
-                )
-            ),
-            (
-                "Archivo de origen",
-                finding.get(
-                    "sourceFile",
-                    ""
-                )
-            ),
-            (
-                "Solapa / origen",
-                finding.get(
-                    "sourceLocation",
-                    ""
-                )
-            ),
-        ]
+    tasks = unique_texts(included_extracted(extracted, {"Tarea realizada"}))
+    row = merge_section_title(ws, row, "Trabajo realizado")
+    if tasks:
+        for idx, task in enumerate(tasks, start=1):
+            set_cell(ws.cell(row, 1), f"{idx})", bold=True, color=NAVY, align="center", border=THIN_BORDER)
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
+            set_cell(ws.cell(row, 2), task, border=THIN_BORDER)
+            ws.row_dimensions[row].height = max(30, min(100, ceil(len(task) / 100) * 17))
+            row += 1
+    else:
+        row = write_merged_text(ws, row, "", min_height=28)
+    row += 1
 
-        for label, value in details:
+    result_categories = {"Conclusión", "Resultado", "Diferencia", "Observación", "Incumplimiento", "Pendiente", "Comentario"}
+    results = unique_texts(included_extracted(extracted, result_categories))
+    if results:
+        row = merge_section_title(ws, row, "Resultados y observaciones relevantes")
+        for text in results:
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+            set_cell(ws.cell(row, 1), f"• {text}", border=THIN_BORDER, fill=VERY_LIGHT_BLUE)
+            ws.row_dimensions[row].height = max(30, min(100, ceil(len(text) / 110) * 17))
+            row += 1
+        row += 1
 
-            ws.cell(
-                row=row,
-                column=1,
-                value=label
-            )
+    row = merge_section_title(ws, row, "Hallazgos")
+    headers = ["N°", "Título", "Situación observada", "Riesgo", "Propuesta de mejora", "Área responsable", "Criticidad", "Estado"]
+    for col_idx, header in enumerate(headers, start=1):
+        set_cell(ws.cell(row, col_idx), header, bold=True, color=WHITE, fill=NAVY,
+                 size=9, align="center", valign="center", border=THIN_BORDER)
+    ws.row_dimensions[row].height = 32
+    row += 1
 
-            ws.cell(
-                row=row,
-                column=1
-            ).font = Font(
-                bold=True
-            )
-
-            ws.merge_cells(
-                start_row=row,
-                start_column=2,
-                end_row=row,
-                end_column=6
-            )
-
-            ws.cell(
-                row=row,
-                column=2,
-                value=value
-            )
-
+    if not findings:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+        set_cell(ws.cell(row, 1), "Sin hallazgos incorporados.", color=MUTED, fill=VERY_LIGHT_BLUE, border=THIN_BORDER)
+        row += 1
+    else:
+        for idx, finding in enumerate(findings, start=1):
+            values = [
+                idx,
+                finding.get("title", ""),
+                finding.get("situation", ""),
+                finding.get("risk", ""),
+                finding.get("proposal", ""),
+                finding.get("responsibleArea", ""),
+                finding.get("severity", ""),
+                finding.get("status", ""),
+            ]
+            fill = WHITE if idx % 2 else VERY_LIGHT_BLUE
+            max_len = 0
+            for col_idx, value in enumerate(values, start=1):
+                cell = ws.cell(row, col_idx)
+                set_cell(cell, value, fill=fill, border=THIN_BORDER, size=9,
+                         align="center" if col_idx in {1, 7, 8} else "left")
+                max_len = max(max_len, len(str(value or "")))
+            sev_fill, sev_font = severity_style(finding.get("severity", ""))
+            set_cell(ws.cell(row, 7), finding.get("severity", ""), bold=True,
+                     color=sev_font, fill=sev_fill, align="center", border=THIN_BORDER, size=9)
+            ws.row_dimensions[row].height = max(42, min(120, ceil(max_len / 55) * 16))
             row += 1
 
-        row += 2
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_options.horizontalCentered = True
+    ws.sheet_view.zoomScale = 85
+    ws.print_area = f"A1:H{max(row, 1)}"
 
-    auto_width(
-        ws
-    )
 
-    # ========================================================
-    # HALLAZGOS
-    # ========================================================
+def build_detail_sheet(ws, headers, rows, widths, severity_column=None):
+    style_sheet_base(ws)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
+    for col_idx, header in enumerate(headers, start=1):
+        set_cell(ws.cell(1, col_idx), header, bold=True, color=WHITE, fill=NAVY,
+                 size=9, align="center", valign="center", border=THIN_BORDER)
+    ws.row_dimensions[1].height = 32
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    ws_findings = workbook.create_sheet(
-        "Hallazgos"
-    )
+    for row_idx, row_values in enumerate(rows, start=2):
+        fill = WHITE if row_idx % 2 else VERY_LIGHT_BLUE
+        max_len = 0
+        for col_idx, value in enumerate(row_values, start=1):
+            set_cell(ws.cell(row_idx, col_idx), value, fill=fill, border=THIN_BORDER, size=9)
+            max_len = max(max_len, len(str(value or "")))
+        if severity_column:
+            severity = row_values[severity_column - 1] if len(row_values) >= severity_column else ""
+            sev_fill, sev_font = severity_style(severity)
+            set_cell(ws.cell(row_idx, severity_column), severity, bold=True, color=sev_font,
+                     fill=sev_fill, align="center", border=THIN_BORDER, size=9)
+        ws.row_dimensions[row_idx].height = max(24, min(100, ceil(max_len / 80) * 15))
 
+
+def validate_source_integrity(findings, sources):
+    source_names = {clean_text(source.get("name", "")) for source in sources if clean_text(source.get("name", ""))}
+    if not source_names:
+        return []
+    foreign = []
+    for finding in findings:
+        source_file = clean_text(finding.get("sourceFile", ""))
+        if source_file and source_file not in source_names:
+            foreign.append(source_file)
+    return sorted(set(foreign))
+
+
+@app.route("/export-excel", methods=["POST"])
+def export_excel():
+    payload = request.get_json(silent=True) or {}
+    memo = payload.get("memo", {})
+    general = memo.get("general", {}) or {}
+    findings = memo.get("findings", []) or []
+    sources = memo.get("sources", []) or []
+    extracted = memo.get("extracted", []) or []
+
+    foreign_sources = validate_source_integrity(findings, sources)
+    if foreign_sources:
+        return jsonify({
+            "error": "La exportación fue bloqueada porque hay hallazgos asociados a fuentes que no pertenecen a esta auditoría: "
+                     + ", ".join(foreign_sources)
+        }), 400
+
+    workbook = Workbook()
+    ws_memo = workbook.active
+    ws_memo.title = "Memo"
+    build_memo_sheet(ws_memo, general, findings, extracted)
+
+    ws_findings = workbook.create_sheet("Hallazgos")
+    ws_findings.sheet_properties.tabColor = "C55A11"
     finding_headers = [
-        "N°",
-        "Título",
-        "Situación observada",
-        "Riesgo",
-        "Propuesta de mejora",
-        "Área responsable",
-        "Responsable plan",
-        "Criticidad",
-        "Estado",
-        "Fecha compromiso",
-        "Base cuantitativa",
-        "Archivo origen",
-        "Solapa / origen",
-        "Evidencia / referencia",
-        "Ticket",
-        "Seguimiento",
+        "N°", "Título", "Situación observada", "Riesgo", "Propuesta de mejora",
+        "Área responsable", "Responsable plan", "Criticidad", "Estado",
+        "Fecha compromiso", "Base cuantitativa", "Archivo origen", "Solapa / origen",
+        "Evidencia / referencia", "Ticket", "Seguimiento"
     ]
-
-    ws_findings.append(
-        finding_headers
-    )
-
-    for cell in ws_findings[1]:
-
-        format_header(
-            cell
-        )
-
-    for index, finding in enumerate(
-        findings,
-        start=1
-    ):
-
-        ws_findings.append([
-            index,
-            finding.get("title", ""),
-            finding.get("situation", ""),
-            finding.get("risk", ""),
-            finding.get("proposal", ""),
-            finding.get("responsibleArea", ""),
-            finding.get("actionOwner", ""),
-            finding.get("severity", ""),
-            finding.get("status", ""),
-            finding.get("targetDate", ""),
-            finding.get("quantitativeBasis", ""),
-            finding.get("sourceFile", ""),
-            finding.get("sourceLocation", ""),
-            finding.get("evidence", ""),
-            finding.get("ticket", ""),
-            finding.get("followUp", ""),
+    finding_rows = []
+    for idx, finding in enumerate(findings, start=1):
+        finding_rows.append([
+            idx, finding.get("title", ""), finding.get("situation", ""), finding.get("risk", ""),
+            finding.get("proposal", ""), finding.get("responsibleArea", ""), finding.get("actionOwner", ""),
+            finding.get("severity", ""), finding.get("status", ""), finding.get("targetDate", ""),
+            finding.get("quantitativeBasis", ""), finding.get("sourceFile", ""), finding.get("sourceLocation", ""),
+            finding.get("evidence", ""), finding.get("ticket", ""), finding.get("followUp", "")
         ])
-
-    ws_findings.freeze_panes = "A2"
-
-    auto_width(
-        ws_findings
+    build_detail_sheet(
+        ws_findings, finding_headers, finding_rows,
+        [6, 28, 45, 35, 38, 20, 20, 12, 16, 16, 20, 28, 22, 28, 16, 30],
+        severity_column=8
     )
 
-    # ========================================================
-    # FUENTES
-    # ========================================================
+    ws_sources = workbook.create_sheet("Fuentes")
+    ws_sources.sheet_properties.tabColor = MID_BLUE
+    source_headers = ["Nombre", "Tipo", "Referencia", "Descripción"]
+    source_rows = [[
+        source.get("name", ""), source.get("type", ""), source.get("reference", ""), source.get("description", "")
+    ] for source in sources]
+    build_detail_sheet(ws_sources, source_headers, source_rows, [38, 14, 28, 55])
 
-    ws_sources = workbook.create_sheet(
-        "Fuentes"
-    )
-
-    ws_sources.append([
-        "Nombre",
-        "Tipo",
-        "Referencia",
-        "Descripción"
-    ])
-
-    for cell in ws_sources[1]:
-
-        format_header(
-            cell
-        )
-
-    for source in sources:
-
-        ws_sources.append([
-            source.get("name", ""),
-            source.get("type", ""),
-            source.get("reference", ""),
-            source.get("description", ""),
-        ])
-
-    auto_width(
-        ws_sources
-    )
-
-    # ========================================================
-    # TRAZABILIDAD
-    # ========================================================
-
-    ws_trace = workbook.create_sheet(
-        "Trazabilidad"
-    )
-
-    ws_trace.append([
-        "Tipo detectado",
-        "Contenido",
-        "Archivo",
-        "Origen / solapa",
-        "Referencia",
-        "Palabra clave",
-        "Incluido"
-    ])
-
-    for cell in ws_trace[1]:
-
-        format_header(
-            cell
-        )
-
-    for item in extracted:
-
-        ws_trace.append([
-            item.get("category", ""),
-            item.get("text", ""),
-            item.get("filename", ""),
-            item.get("originName", ""),
-            item.get("reference", ""),
-            item.get("keyword", ""),
-            (
-                "Sí"
-                if item.get("included")
-                else "No"
-            ),
-        ])
-
-    auto_width(
-        ws_trace
-    )
-
-    # ========================================================
-    # DESCARGA
-    # ========================================================
+    ws_trace = workbook.create_sheet("Trazabilidad")
+    ws_trace.sheet_properties.tabColor = "70AD47"
+    trace_headers = ["Tipo detectado", "Contenido", "Archivo", "Origen / solapa", "Referencia", "Palabra clave", "Incluido", "Convertido"]
+    trace_rows = [[
+        item.get("category", ""), item.get("text", ""), item.get("filename", ""), item.get("originName", ""),
+        item.get("reference", ""), item.get("keyword", ""), "Sí" if item.get("included") else "No",
+        "Sí" if item.get("converted") else "No"
+    ] for item in extracted]
+    build_detail_sheet(ws_trace, trace_headers, trace_rows, [18, 65, 34, 28, 15, 20, 10, 11])
 
     output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
 
-    workbook.save(
-        output
-    )
-
-    output.seek(
-        0
-    )
-
-    filename = (
-        "Audit_Memo_"
-        + datetime.now().strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        + ".xlsx"
-    )
+    safe_title = re.sub(r"[^A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ _-]+", "", clean_text(general.get("title", "")))
+    safe_title = re.sub(r"\s+", "_", safe_title).strip("_") or "Audit_Memo"
+    filename = f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
     return send_file(
         output,
         as_attachment=True,
         download_name=filename,
-        mimetype=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        )
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False
-    )
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
