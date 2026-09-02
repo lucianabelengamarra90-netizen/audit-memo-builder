@@ -4,11 +4,6 @@
 
 const STORAGE_PREFIX = "auditMemoBuilder:v3";
 const AUTOSAVE_DELAY = 350;
-const FINDING_ELIGIBLE = new Set([
-    "Hallazgo", "Observación", "Diferencia", "Incumplimiento",
-    "Riesgo", "Pendiente", "Conclusión"
-]);
-
 let autosaveTimer = null;
 let selectedFiles = [];
 let extractionInProgress = false;
@@ -52,6 +47,23 @@ function escapeHtml(value) {
 }
 
 function storageKey() { return `${STORAGE_PREFIX}:current`; }
+function onlyHallazgos(items) {
+    return Array.isArray(items) ? items.filter(item => item?.category === "Hallazgo") : [];
+}
+function indexHallazgos(items) {
+    return (Array.isArray(items) ? items : [])
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => item?.category === "Hallazgo");
+}
+function hallazgoItemsWithIndexes() {
+    return indexHallazgos(state.extracted);
+}
+function isFindingEligible(item) {
+    return item?.category === "Hallazgo";
+}
+function eligibleIncludedHallazgos(items) {
+    return onlyHallazgos(items).filter(item => item.included && !item.converted);
+}
 function saveState() {
     try {
         state.updatedAt = new Date().toISOString();
@@ -75,7 +87,7 @@ function loadState() {
             ...saved,
             general: { ...createEmptyState().general, ...(saved.general || {}) },
             sources: saved.sources || [],
-            extracted: saved.extracted || [],
+            extracted: onlyHallazgos(saved.extracted),
             findings: saved.findings || []
         };
     } catch (error) {
@@ -293,7 +305,7 @@ async function extractInformation() {
         try { data = await response.json(); } catch (_) {}
         if (!response.ok) throw new Error(data.error || "No se pudo procesar la documentación.");
 
-        state.extracted = (data.items || []).map(item => ({
+        state.extracted = onlyHallazgos(data.items).map(item => ({
             ...item,
             included: Boolean(item.included),
             converted: Boolean(item.converted)
@@ -335,17 +347,18 @@ function renderExtraction() {
         renderExtractionStatus("Analizando todas las solapas del papel de trabajo…", "loading");
         return;
     }
-    if (count) count.textContent = `${state.extracted.length} elementos`;
-    if (!state.extracted.length) {
+    const hallazgos = hallazgoItemsWithIndexes();
+    if (count) count.textContent = `${hallazgos.length} hallazgo(s)`;
+    if (!hallazgos.length) {
         empty.style.display = "block";
-        empty.innerHTML = `<div class="empty-icon">⌕</div><h3>Todavía no hay información extraída</h3><p>Cargá tus papeles de trabajo desde el paso anterior.</p>`;
+        empty.innerHTML = `<div class="empty-icon">⌕</div><h3>No se encontraron hallazgos documentados</h3><p>La extracción solo muestra filas que contienen la palabra completa hallazgo o hallazgos.</p>`;
         list.innerHTML = "";
         return;
     }
 
     empty.style.display = "none";
-    list.innerHTML = state.extracted.map((item, index) => {
-        const eligible = FINDING_ELIGIBLE.has(item.category);
+    list.innerHTML = hallazgos.map(({ item, index }) => {
+        const eligible = isFindingEligible(item);
         return `
             <article class="extraction-card">
                 <div class="extraction-card-header">
@@ -404,7 +417,7 @@ function findingFromItem(item) {
 
 function convertOneToFinding(index) {
     const item = state.extracted[index];
-    if (!item || item.converted || !FINDING_ELIGIBLE.has(item.category)) return;
+    if (!item || item.converted || !isFindingEligible(item)) return;
     state.findings.push(findingFromItem(item));
     item.converted = true;
     item.included = true;
@@ -418,12 +431,10 @@ function convertOneToFinding(index) {
 
 function convertSelectedToFindings() {
     let created = 0;
-    state.extracted.forEach(item => {
-        if (item.included && !item.converted && FINDING_ELIGIBLE.has(item.category)) {
+    eligibleIncludedHallazgos(state.extracted).forEach(item => {
             state.findings.push(findingFromItem(item));
             item.converted = true;
             created += 1;
-        }
     });
     saveState();
     renderExtraction();
@@ -706,7 +717,7 @@ function showToast(message, type = "info") {
 // INICIO
 // ============================================================
 
-document.addEventListener("DOMContentLoaded", () => {
+if (typeof document !== "undefined") document.addEventListener("DOMContentLoaded", () => {
     loadState();
     hydrateGeneral();
     bindGeneralFields();
@@ -719,6 +730,7 @@ document.addEventListener("DOMContentLoaded", () => {
     goToStep(state.currentStep || 1);
 });
 
+if (typeof window !== "undefined") {
 window.goToStep = goToStep;
 window.extractInformation = extractInformation;
 window.convertSelectedToFindings = convertSelectedToFindings;
@@ -733,3 +745,13 @@ window.removeFile = removeFile;
 window.exportExcel = exportExcel;
 window.improveField = improveField;
 window.startNewAudit = startNewAudit;
+}
+
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+        onlyHallazgos,
+        indexHallazgos,
+        isFindingEligible,
+        eligibleIncludedHallazgos
+    };
+}

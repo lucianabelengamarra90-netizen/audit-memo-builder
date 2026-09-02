@@ -33,53 +33,10 @@ app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 # ============================================================
 
 ALLOWED_EXTENSIONS = {"xlsx", "csv", "docx", "pdf", "txt"}
-MAX_DISPLAY_ITEMS_PER_SHEET = 250
 MAX_ROW_TEXT_LENGTH = 12000
 PROGRESS_LOG_EVERY_ROWS = 100000
 
-KEYWORD_GROUPS = {
-    "Hallazgo": ["hallazgo", "hallazgos"],
-    "Conclusión": ["conclusion", "conclusiones"],
-    "Diferencia": ["diferencia", "diferencias", "discrepancia", "discrepancias"],
-    "Observación": ["observacion", "observaciones", "desvio", "desvios"],
-    "Resultado": ["resultado", "resultados", "sin excepcion", "sin diferencias", "sin observaciones"],
-    "Riesgo": ["riesgo", "riesgos"],
-    "Propuesta de mejora": ["propuesta", "propuesta de mejora", "recomendacion", "recomendaciones", "mejora"],
-    "Objetivo": ["objetivo", "objetivos"],
-    "Alcance": ["alcance"],
-    "Tarea realizada": [
-        "tarea", "tareas", "tarea realizada", "tareas realizadas",
-        "procedimiento realizado", "procedimientos realizados", "trabajo realizado",
-        "prueba realizada", "pruebas realizadas", "recalculo", "recálculo",
-        "cruce realizado", "cruce", "validacion", "validación"
-    ],
-    "Incumplimiento": ["incumplimiento", "incumplimientos"],
-    "Pendiente": ["pendiente", "pendientes"],
-    "Acción": ["accion", "acciones", "plan de accion", "plan de acción"],
-    "Comentario": ["comentario", "comentarios"],
-}
-
-SECTION_HEADERS = {
-    "objetivo": ("Objetivo", "objetivo"),
-    "alcance": ("Alcance", "alcance"),
-    "trabajo realizado": ("Tarea realizada", "trabajo realizado"),
-    "tareas realizadas": ("Tarea realizada", "tareas realizadas"),
-    "procedimientos realizados": ("Tarea realizada", "procedimientos realizados"),
-    "hallazgos generales": ("Hallazgo", "hallazgos generales"),
-    "hallazgo general": ("Hallazgo", "hallazgo general"),
-    "hallazgos particulares": ("Hallazgo", "hallazgos particulares"),
-    "hallazgos particulares de cada acuerdo": ("Hallazgo", "hallazgos particulares de cada acuerdo"),
-    "conclusiones": ("Conclusión", "conclusiones"),
-    "conclusion": ("Conclusión", "conclusion"),
-    "resultados": ("Resultado", "resultados"),
-    "riesgos": ("Riesgo", "riesgos"),
-    "propuestas de mejora": ("Propuesta de mejora", "propuestas de mejora"),
-}
-
-COLUMN_HEADER_CATEGORIES = {
-    "Hallazgo", "Conclusión", "Diferencia", "Observación", "Resultado",
-    "Riesgo", "Propuesta de mejora", "Tarea realizada", "Comentario"
-}
+HALLAZGO_PATTERN = re.compile(r"\bhallazgos?\b")
 
 
 def normalize_text(value):
@@ -110,33 +67,12 @@ def row_to_text(values):
     return result[:MAX_ROW_TEXT_LENGTH]
 
 
-NORMALIZED_KEYWORDS = {
-    category: [(normalize_text(keyword), keyword) for keyword in keywords]
-    for category, keywords in KEYWORD_GROUPS.items()
-}
-
-
 def detect_categories(text):
     normalized = normalize_text(text)
     if not normalized:
         return []
-    matches = []
-    for category, pairs in NORMALIZED_KEYWORDS.items():
-        for normalized_keyword, original_keyword in pairs:
-            if normalized_keyword and normalized_keyword in normalized:
-                matches.append({"category": category, "keyword": original_keyword})
-                break
-    return matches
-
-
-def detect_section_header(text):
-    normalized = normalize_text(text).strip(" :-–—")
-    if not normalized or len(normalized) > 100:
-        return None
-    for label, (category, keyword) in SECTION_HEADERS.items():
-        if normalized == label or normalized.startswith(label + " "):
-            return {"category": category, "keyword": keyword}
-    return None
+    match = HALLAZGO_PATTERN.search(normalized)
+    return [{"category": "Hallazgo", "keyword": match.group(0)}] if match else []
 
 
 def column_letter_from_ref(cell_ref):
@@ -214,12 +150,10 @@ def create_shared_strings_index(archive, db_path):
                     parts.append(text_element.text)
             value = "".join(parts)
             matches = detect_categories(value)
-            section = detect_section_header(value)
-            if matches or section:
+            if matches:
                 relevant_map[index] = {
                     "value": value,
                     "matches": matches,
-                    "section": section,
                 }
             batch.append((index, value))
             index += 1
@@ -324,12 +258,7 @@ def extract_xlsx(uploaded_file, filename):
 
                 rows_processed = 0
                 relevant_rows = 0
-                displayed_items = 0
-                omitted_items = 0
-                relevant_columns = {}
-                active_section = None
-                blank_rows_in_section = 0
-
+                extracted_items = 0
                 with archive.open(sheet["path"]) as stream:
                     for _, row_element in ET.iterparse(stream, events=("end",)):
                         if row_element.tag != qname(MAIN_NS, "row"):
@@ -345,9 +274,7 @@ def extract_xlsx(uploaded_file, filename):
                         row_number = row_element.attrib.get("r", "")
                         descriptors = []
                         direct_matches = []
-                        header_candidates = []
                         nonempty_cells = 0
-                        row_has_relevant_column_value = False
 
                         for cell in row_element.findall(qname(MAIN_NS, "c")):
                             cell_type = cell.attrib.get("t")
@@ -368,13 +295,6 @@ def extract_xlsx(uploaded_file, filename):
                                 info = relevant_map.get(shared_index)
                                 if info:
                                     direct_matches.extend(info.get("matches") or [])
-                                    if info.get("section"):
-                                        header_candidates.append((column, info["value"], info["section"]))
-                                    elif info.get("matches"):
-                                        header_candidates.append((column, info["value"], None))
-
-                                if column in relevant_columns:
-                                    row_has_relevant_column_value = True
 
                             elif cell_type == "inlineStr":
                                 value = extract_inline_string(cell)
@@ -383,12 +303,7 @@ def extract_xlsx(uploaded_file, filename):
                                 descriptors.append(("text", value))
                                 nonempty_cells += 1
                                 matches = detect_categories(value)
-                                section = detect_section_header(value)
                                 direct_matches.extend(matches)
-                                if matches or section:
-                                    header_candidates.append((column, value, section))
-                                if column in relevant_columns:
-                                    row_has_relevant_column_value = True
 
                             else:
                                 raw = get_raw_cell_value(cell)
@@ -398,53 +313,13 @@ def extract_xlsx(uploaded_file, filename):
                                 nonempty_cells += 1
                                 if cell_type == "str":
                                     matches = detect_categories(raw)
-                                    section = detect_section_header(raw)
                                     direct_matches.extend(matches)
-                                    if matches or section:
-                                        header_candidates.append((column, raw, section))
-                                if column in relevant_columns:
-                                    row_has_relevant_column_value = True
 
                         if nonempty_cells == 0:
-                            if active_section:
-                                blank_rows_in_section += 1
-                                if blank_rows_in_section >= 2:
-                                    active_section = None
-                                    blank_rows_in_section = 0
                             row_element.clear()
                             continue
-                        blank_rows_in_section = 0
 
-                        new_section = None
-                        if nonempty_cells <= 2:
-                            for _, value, section in header_candidates:
-                                section = section or detect_section_header(value)
-                                if section:
-                                    new_section = section
-                                    break
-                        if new_section:
-                            active_section = new_section
-
-                        if nonempty_cells >= 3:
-                            for column, value, _ in header_candidates:
-                                matches = detect_categories(value)
-                                normalized_value = normalize_text(value)
-                                for match in matches:
-                                    if (
-                                        match["category"] in COLUMN_HEADER_CATEGORIES
-                                        and len(normalized_value) <= 100
-                                    ):
-                                        relevant_columns[column] = match
-                                        break
-
-                        effective_matches = list(direct_matches)
-                        if row_has_relevant_column_value:
-                            for _, match in relevant_columns.items():
-                                effective_matches.append(match)
-                        elif active_section and not new_section:
-                            effective_matches.append(active_section)
-
-                        if not effective_matches:
+                        if not direct_matches:
                             row_element.clear()
                             continue
 
@@ -459,16 +334,13 @@ def extract_xlsx(uploaded_file, filename):
                         relevant_rows += 1
                         unique_matches = []
                         seen_match_keys = set()
-                        for match in effective_matches:
+                        for match in direct_matches:
                             key = (match.get("category", ""), match.get("keyword", ""))
                             if key not in seen_match_keys:
                                 seen_match_keys.add(key)
                                 unique_matches.append(match)
 
                         for match in unique_matches:
-                            if displayed_items >= MAX_DISPLAY_ITEMS_PER_SHEET:
-                                omitted_items += 1
-                                continue
                             item = make_item(
                                 match.get("category", "Información"),
                                 row_text,
@@ -479,20 +351,15 @@ def extract_xlsx(uploaded_file, filename):
                                 match.get("keyword", ""),
                             )
                             if add_unique_item(items, seen, item):
-                                displayed_items += 1
+                                extracted_items += 1
 
                         row_element.clear()
 
                 print(
                     f"Solapa finalizada: {sheet_name} | Filas: {rows_processed} | "
-                    f"Filas relevantes: {relevant_rows} | Mostradas: {displayed_items}",
+                    f"Filas relevantes: {relevant_rows} | Extraídas: {extracted_items}",
                     flush=True
                 )
-                if omitted_items:
-                    warnings.append(
-                        f"{filename} · {sheet_name}: se analizaron todas las filas, pero se muestran "
-                        f"hasta {MAX_DISPLAY_ITEMS_PER_SHEET} elementos para no sobrecargar la pantalla."
-                    )
 
     except zipfile.BadZipFile:
         raise ValueError("El archivo Excel no es válido o está dañado.")
@@ -562,7 +429,7 @@ def extract_docx(uploaded_file, filename):
 
 
 def extract_pdf(uploaded_file, filename):
-    items, seen = [], set()
+    items, warnings, seen = [], [], set()
     reader = PdfReader(BytesIO(uploaded_file.read()))
     pages_with_text = 0
     for page_number, page in enumerate(reader.pages, start=1):
@@ -585,11 +452,10 @@ def extract_pdf(uploaded_file, filename):
                     f"Página {page_number}", match["keyword"]
                 ))
     if pages_with_text == 0:
-        items.append(make_item(
-            "Advertencia", "No se pudo extraer texto del PDF. El documento puede estar escaneado.",
-            filename, "PDF", "Documento"
-        ))
-    return items
+        warnings.append(
+            f"{filename}: no se pudo extraer texto del PDF; el documento puede estar escaneado."
+        )
+    return items, warnings
 
 
 def extract_txt(uploaded_file, filename):
@@ -668,7 +534,9 @@ def extract_information():
             elif extension == "docx":
                 extracted_items.extend(extract_docx(uploaded_file, filename))
             elif extension == "pdf":
-                extracted_items.extend(extract_pdf(uploaded_file, filename))
+                pdf_items, pdf_warnings = extract_pdf(uploaded_file, filename)
+                extracted_items.extend(pdf_items)
+                warnings.extend(pdf_warnings)
             elif extension == "txt":
                 extracted_items.extend(extract_txt(uploaded_file, filename))
         except Exception as exc:
@@ -685,7 +553,7 @@ def extract_information():
         "errors": errors,
         "warnings": warnings,
         "message": (
-            f"Se identificaron {len(extracted_items)} elementos potencialmente relevantes. "
+            f"Se identificaron {len(extracted_items)} filas con la palabra hallazgo o hallazgos. "
             "Revisalos antes de incorporarlos al memo."
         )
     })
