@@ -10,34 +10,30 @@ const {
     eligibleIncludedHallazgos,
 } = require("../static/app.js");
 
-test("filters restored or received lists to Hallazgo only", () => {
-    const hallazgo = { id: "h", category: "Hallazgo" };
-    const items = [
-        { id: "o", category: "Observación" },
-        hallazgo,
-        { id: "r", category: "Riesgo" },
-    ];
-    assert.deepEqual(onlyHallazgos(items), [hallazgo]);
+test("preserves all extracted items for processing", () => {
+    const item1 = { id: "h", category: "Hallazgo" };
+    const item2 = { id: "o", category: "Observación" };
+    const items = [item2, item1];
+    assert.deepEqual(onlyHallazgos(items), [item2, item1]);
     assert.deepEqual(onlyHallazgos(null), []);
 });
 
-test("keeps original indexes when preparing the rendered Hallazgo list", () => {
+test("keeps original indexes for all extracted items", () => {
     const items = [
         { id: "old", category: "Diferencia" },
         { id: "first", category: "Hallazgo" },
-        { id: "other", category: "Conclusión" },
-        { id: "second", category: "Hallazgo" },
     ];
     assert.deepEqual(indexHallazgos(items).map(({ item, index }) => [item.id, index]), [
-        ["first", 1], ["second", 3],
+        ["old", 0], ["first", 1],
     ]);
 });
 
-test("only Hallazgo items are eligible conversion candidates", () => {
+test("all valid interpreted items are eligible conversion candidates", () => {
     const hallazgo = { category: "Hallazgo", included: true, converted: false };
     const converted = { category: "Hallazgo", included: true, converted: true };
-    const risk = { category: "Riesgo", included: true, converted: false };
+    const diff = { category: "Diferencia", included: true, converted: false };
     assert.equal(isFindingEligible(hallazgo), true);
-    assert.equal(isFindingEligible(risk), false);
-    assert.deepEqual(eligibleIncludedHallazgos([risk, converted, hallazgo]), [hallazgo]);
+    assert.equal(isFindingEligible(diff), true);
+    assert.deepEqual(eligibleIncludedHallazgos([diff, converted, hallazgo]), [diff, hallazgo]);
 });
+

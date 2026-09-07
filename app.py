@@ -36,8 +36,6 @@ ALLOWED_EXTENSIONS = {"xlsx", "csv", "docx", "pdf", "txt"}
 MAX_ROW_TEXT_LENGTH = 12000
 PROGRESS_LOG_EVERY_ROWS = 100000
 
-HALLAZGO_PATTERN = re.compile(r"\bhallazgos?\b")
-
 
 def normalize_text(value):
     if value is None:
@@ -67,12 +65,118 @@ def row_to_text(values):
     return result[:MAX_ROW_TEXT_LENGTH]
 
 
+FINDING_PATTERNS = [
+    (re.compile(r"\bhallazgos?\b"), "Hallazgo", "Sección / término de hallazgo"),
+    (re.compile(r"\bno\s+(se\s+)?(obtuvo|evidenc|encontr|cont|adjunt|present|verific|document|firm)\b"), "Falta de documentación", "Falta de evidencia o respaldo"),
+    (re.compile(r"\b(sin|falta\s+de)\s+(respaldo|convenio|firma|document|aprobacion|autorizacion|comprobante)\b"), "Falta de documentación", "Ausencia de respaldo o formalización"),
+    (re.compile(r"\b(diferencia|inconsistencia|discrepancia|desfasaje)\b"), "Diferencia", "Diferencia o inconsistencia de montos/datos"),
+    (re.compile(r"\bno\s+coincide\b"), "Diferencia", "Descalce entre registros"),
+    (re.compile(r"\b(sin|pendiente\s+de)\s+(justificar|conciliar|regularizar|explicar)\b"), "Diferencia", "Diferencia pendiente sin justificación"),
+    (re.compile(r"\b(duplicad[oa]s?|anulad[oa]\s+en\s+un\s+sistema)\b"), "Inconsistencia", "Operación duplicada o inconsistente entre sistemas"),
+    (re.compile(r"\b(sin|falta\s+de)\s+(procedimiento|circuito|control)\b"), "Debilidad de control", "Debilidad o ausencia de control interno"),
+    (re.compile(r"\bcontrol\s+(manual|sin\s+evidencia)\b"), "Debilidad de control", "Control manual sin evidencia de revisión"),
+    (re.compile(r"\b(incumplimiento|excepcion|desvio|irregularidad)\b"), "Incumplimiento", "Excepción o desvío respecto a la norma/proceso"),
+]
+
+FALSE_POSITIVE_PATTERNS = [
+    re.compile(r"\bno\s+se\s+identificar?on?\s+(diferencias?|hallazgos?|observaciones?|excepciones?|errores?)\b"),
+    re.compile(r"\bsin\s+(diferencias?|observaciones?|hallazgos?|excepciones?|novedades?)\b"),
+    re.compile(r"\bcumple\s+(con\s+el\s+procedimiento|correctamente|sin\s+observaciones)\b"),
+    re.compile(r"\bse\s+realiz[oa]\s+(el\s+)?(cruce|recalculo|revision)\b"),
+]
+
+GENERIC_HEADER_TERMS = {
+    "hallazgos", "hallazgos generales", "hallazgos particulares",
+    "hallazgos particulares de cada acuerdo", "resumen de hallazgos",
+    "cuadro de hallazgos", "listado de hallazgos", "saldo recalculado",
+    "diferencia", "diferencias", "observacion", "observaciones",
+    "observaciones generales", "excepciones", "hallazgo"
+}
+
+
+def is_header_or_section_title(text):
+    if not text:
+        return True
+    norm = normalize_text(text)
+    if not norm:
+        return True
+    if norm in GENERIC_HEADER_TERMS:
+        return True
+    parts = [p.strip() for p in str(text).split("|") if p.strip()]
+    if len(parts) == 1 and normalize_text(parts[0]) in GENERIC_HEADER_TERMS:
+        return True
+    return False
+
+
+def smart_local_redaction(text, category="Hallazgo", reason=""):
+    clean_t = clean_text(text)
+    norm = normalize_text(clean_t)
+    
+    parts = [p.strip() for p in clean_t.split("|") if p.strip()]
+    non_header_parts = [p for p in parts if not is_header_row(p) and normalize_text(p) not in GENERIC_HEADER_TERMS]
+    narrative = " | ".join(non_header_parts) if non_header_parts else clean_t
+
+    title = f"{category} detectado"
+    situation = narrative
+    risk = "Riesgo de inconsistencia operativa, descalce de información o debilidad de control interno."
+    proposal = "Revisar la situación relevada, regularizar la registración y respaldar documentalmente la operación."
+
+    if "cuota" in norm:
+        title = "Diferencia entre cuotas registradas y convenio contractual"
+        situation = f"En la verificación del plan de pagos se constató la siguiente discrepancia en cuotas: {narrative}."
+        risk = "Riesgo de sobreprecio, facturación indebida o descalce en la cobranza contractual."
+        proposal = "Conciliar la cantidad de cuotas en la base de datos con el convenio legal firmado."
+    elif "tna" in norm or "interes" in norm or "tasa" in norm:
+        title = "Ausencia de especificación de la Tasa Nominal Anual (TNA)"
+        situation = f"Se observó que la documentación u operación no explicita la TNA aplicada: {narrative}."
+        risk = "Riesgo de incertidumbre legal sobre intereses devengados y descalce en saldos recalculados."
+        proposal = "Explicitar la TNA aplicada en la documentación respaldatoria y recalcular saldos."
+    elif "diferencia" in norm or "no coincide" in norm or "desfase" in norm:
+        title = "Diferencia no conciliada entre saldo informado y recalculado"
+        situation = f"Se detectó un descalce entre los registros informados y el cálculo contractual: {narrative}."
+        risk = "Riesgo de registración errónea de saldos pasivos/activos y distorsión patrimonial."
+        proposal = "Ajustar el saldo informado al recálculo contractual e identificar la causa del descalce."
+    elif "falta" in norm or "sin respaldo" in norm or "sin firma" in norm or "sin documento" in norm or "convenio" in norm:
+        title = "Falta de documentación respaldatoria o formalización legal"
+        situation = f"Se identificó falta de documentación respaldatoria o vacíos formales: {narrative}."
+        risk = "Riesgo de desprotección legal y vulnerabilidad ante auditorías o inspecciones."
+        proposal = "Requerir y adjuntar la documentación de respaldo completa y las firmas autorizadas."
+    elif "duplicad" in norm:
+        title = "Registración duplicada en sistemas"
+        situation = f"Se observaron registros o movimientos duplicados: {narrative}."
+        risk = "Riesgo de duplicación de egresos/pagos y distorsión de registros operativos."
+        proposal = "Anular la duplicación detectada e implementar validaciones de unicidad en el sistema."
+
+    return {
+        "title": title,
+        "situation": situation,
+        "risk": risk,
+        "proposal": proposal
+    }
+
+
 def detect_categories(text):
     normalized = normalize_text(text)
-    if not normalized:
+    if not normalized or is_header_or_section_title(text):
         return []
-    match = HALLAZGO_PATTERN.search(normalized)
-    return [{"category": "Hallazgo", "keyword": match.group(0)}] if match else []
+    
+    for fp in FALSE_POSITIVE_PATTERNS:
+        if fp.search(normalized):
+            return []
+            
+    matches = []
+    seen_categories = set()
+    for pattern, category, reason in FINDING_PATTERNS:
+        match = pattern.search(normalized)
+        if match and category not in seen_categories:
+            seen_categories.add(category)
+            matches.append({
+                "category": category,
+                "keyword": match.group(0),
+                "reason": reason
+            })
+    return matches
+
 
 
 def column_letter_from_ref(cell_ref):
@@ -82,19 +186,33 @@ def column_letter_from_ref(cell_ref):
     return match.group(1) if match else ""
 
 
-def make_item(category, text, filename, origin_type, origin_name="", reference="", keyword=""):
+def make_item(category, text, filename, origin_type, origin_name="", reference="", keyword="", reason="", title="", situation="", risk="", proposal=""):
+    clean_t = clean_text(text)
+    if not title or not situation:
+        draft = smart_local_redaction(clean_t, category, reason)
+        title = title or draft["title"]
+        situation = situation or draft["situation"]
+        risk = risk or draft["risk"]
+        proposal = proposal or draft["proposal"]
+
     return {
         "id": str(uuid.uuid4()),
         "category": category,
-        "text": clean_text(text),
+        "text": clean_t,
+        "title": clean_text(title),
+        "situation": clean_text(situation),
+        "risk": clean_text(risk),
+        "proposal": clean_text(proposal),
         "filename": filename,
         "originType": origin_type,
         "originName": origin_name,
         "reference": reference,
         "keyword": keyword,
+        "reason": reason,
         "included": False,
         "converted": False,
     }
+
 
 
 def add_unique_item(items, seen, item):
@@ -349,9 +467,11 @@ def extract_xlsx(uploaded_file, filename):
                                 sheet_name,
                                 f"Fila {row_number}" if row_number else "",
                                 match.get("keyword", ""),
+                                match.get("reason", ""),
                             )
                             if add_unique_item(items, seen, item):
                                 extracted_items += 1
+
 
                         row_element.clear()
 
@@ -479,9 +599,6 @@ def extract_txt(uploaded_file, filename):
                 match["category"], line, filename, "TXT", "Documento",
                 f"Línea {line_number}", match["keyword"]
             ))
-    return items
-
-
 def extract_free_text(text):
     items, seen = [], set()
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -491,14 +608,159 @@ def extract_free_text(text):
         for match in detect_categories(line):
             add_unique_item(items, seen, make_item(
                 match["category"], line, "Texto ingresado", "Texto", "Ingreso manual",
-                f"Línea {line_number}", match["keyword"]
+                f"Línea {line_number}", match["keyword"], match.get("reason", "")
             ))
     return items
+
+
+def is_header_row(text):
+
+    normalized = normalize_text(text)
+    header_terms = ["sucursal", "cuit", "comisionista", "tipo deuda", "nro guia", "fecha", "total facturado", "importe", "deuda", "cuotas", "pendientes", "tna", "motivo", "aprobacion", "capital", "recálculo"]
+    matches = sum(1 for term in header_terms if term in normalized)
+    return matches >= 4
+
+def analyze_and_consolidate_findings_with_ai(items):
+    filtered_items = []
+    for item in items:
+        text = item.get("text", "")
+        if is_header_or_section_title(text) or is_header_row(text):
+            continue
+        
+        # Descartar redondeos irrelevantes (diferencias menores a $100 en centavos o montos ínfimos)
+        match_diff = re.search(r"diferencia\s+de\s+\$?(\d+(?:\.\d+)?)", normalize_text(text))
+        if match_diff:
+            try:
+                diff_val = float(match_diff.group(1))
+                if diff_val < 100:
+                    continue
+            except ValueError:
+                pass
+                
+        filtered_items.append(item)
+        
+    if not filtered_items:
+        return []
+
+    openai_client = get_openai_client()
+    if openai_client:
+        items_summary = []
+        for idx, item in enumerate(filtered_items, start=1):
+            items_summary.append(
+                f"ID: {idx} | Archivo: {item.get('filename')} | Solapa: {item.get('originName')} | "
+                f"Ref: {item.get('reference')} | Detección: {item.get('reason', item.get('keyword'))}\n"
+                f"Texto: {item.get('text')}\n"
+            )
+        combined_prompt = "\n---\n".join(items_summary)
+
+        instructions = """
+Actuá como Auditor Senior especialista en Auditoría Interna.
+Recibirás un conjunto de filas y observaciones extraídas de papeles de trabajo de auditoría.
+Tu tarea es PENSAR como auditor:
+1. Evaluar si cada elemento es una verdadera excepción/hallazgo de auditoría relevante.
+2. Descartar redondeos irrelevantes, encabezados de tabla o títulos de sección sin observaciones.
+3. Consolidar aquellas filas que correspondan a la misma situación observada.
+4. Para cada hallazgo genuino consolidado, devolver un JSON con la lista 'findings':
+   - category: Categoría (ej: "Diferencia no conciliada", "Falta de documentación", "Debilidad de control", "Inconsistencia entre sistemas")
+   - title: Título corto y ejecutivo del hallazgo.
+   - situation: Descripción objetiva de la Situación observada (nunca usar la palabra Condición).
+   - risk: Riesgo potencial o impacto implícito.
+   - proposal: Propuesta de mejora orientada al control interno y eficiencia.
+   - filename: Nombre del archivo de origen.
+   - originName: Nombre de la solapa de origen.
+   - reference: Referencia de fila/sección.
+   - keyword: Término o motivo clave de detección.
+   - reason: Motivo por el cual constituye un hallazgo.
+
+RESTRICCIÓN STRICTA: NO INVENTES HECHOS, IMPORTES NI FECHAS QUE NO ESTÉN EN EL TEXTO.
+Devolvé ÚNICAMENTE un JSON con la estructura {"findings": [...]}.
+"""
+
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": combined_prompt}
+                ],
+                temperature=0.2
+            )
+            output_text = clean_text(response.choices[0].message.content)
+
+            json_match = re.search(r"\{.*\}", output_text, re.DOTALL)
+            if json_match:
+                import json
+                parsed = json.loads(json_match.group(0))
+                ai_findings = parsed.get("findings", [])
+                if ai_findings:
+                    result_items = []
+                    for f in ai_findings:
+                        raw_t = f.get("situation", f.get("text", ""))
+                        result_items.append(make_item(
+                            category=f.get("category", "Hallazgo"),
+                            text=raw_t,
+                            filename=f.get("filename", filtered_items[0].get("filename", "")),
+                            origin_type="Excel",
+                            origin_name=f.get("originName", filtered_items[0].get("originName", "")),
+                            reference=f.get("reference", filtered_items[0].get("reference", "")),
+                            keyword=f.get("keyword", "ia"),
+                            reason=f.get("reason", "Hallazgo consolidado e interpretado por IA"),
+                            title=f.get("title", ""),
+                            situation=raw_t,
+                            risk=f.get("risk", ""),
+                            proposal=f.get("proposal", "")
+                        ))
+                    return result_items
+        except Exception as exc:
+            print(f"Error consolidando hallazgos con IA: {exc}", flush=True)
+
+    # Consolidación e interpretación de texto si no hay OpenAI API KEY válida en local
+    consolidated_local = []
+    seen_texts = set()
+    for item in filtered_items:
+        clean_t = item.get("text", "")
+        if is_header_or_section_title(clean_t):
+            continue
+        
+        parts = [p.strip() for p in clean_t.split("|") if p.strip()]
+        
+        # Buscar la parte narrativa que contiene la explicación del hallazgo/observación
+        relevant_part = ""
+        for p in parts:
+            p_norm = normalize_text(p)
+            if any(kw in p_norm for kw in ["no coincide", "diferencia", "duplicad", "pendiente", "convenio", "egreso", "saldo"]):
+                if not is_header_row(p) and not is_header_or_section_title(p):
+                    relevant_part = p
+                    break
+        
+        if not relevant_part and parts:
+            non_headers = [p for p in parts if not is_header_row(p) and not is_header_or_section_title(p)]
+            relevant_part = " | ".join(non_headers) if non_headers else clean_t
+
+        if is_header_or_section_title(relevant_part):
+            continue
+
+        key = (item.get("originName"), normalize_text(relevant_part)[:80])
+        if key not in seen_texts:
+            seen_texts.add(key)
+            item_copy = dict(item)
+            item_copy["text"] = relevant_part
+            draft = smart_local_redaction(relevant_part, item.get("category", "Hallazgo"), item.get("reason", ""))
+            item_copy["title"] = draft["title"]
+            item_copy["situation"] = draft["situation"]
+            item_copy["risk"] = draft["risk"]
+            item_copy["proposal"] = draft["proposal"]
+            consolidated_local.append(item_copy)
+
+    return consolidated_local
+
+
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 
 @app.route("/health")
@@ -547,16 +809,19 @@ def extract_information():
     if free_text:
         extracted_items.extend(extract_free_text(free_text))
 
+    consolidated_items = analyze_and_consolidate_findings_with_ai(extracted_items)
+
     return jsonify({
-        "items": extracted_items,
-        "count": len(extracted_items),
+        "items": consolidated_items,
+        "count": len(consolidated_items),
         "errors": errors,
         "warnings": warnings,
         "message": (
-            f"Se identificaron {len(extracted_items)} filas con la palabra hallazgo o hallazgos. "
+            f"Se identificaron {len(consolidated_items)} potenciales hallazgos analizados e interpretados. "
             "Revisalos antes de incorporarlos al memo."
         )
     })
+
 
 
 @app.route("/analyze", methods=["POST"])
@@ -593,12 +858,15 @@ Devolvé solamente el texto final.
     prompt = f"TIPO DE CAMPO:\n{field_type}\n\nTEXTO DEL AUDITOR:\n{text}"
 
     try:
-        response = openai_client.responses.create(
-            model="gpt-5.6-luna",
-            instructions=instructions,
-            input=prompt,
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
         )
-        improved = clean_text(response.output_text)
+        improved = clean_text(response.choices[0].message.content)
         if not improved:
             return jsonify({"error": "La IA no devolvió una redacción."}), 500
         return jsonify({"original": text, "improved": improved})
@@ -607,6 +875,61 @@ Devolvé solamente el texto final.
         return jsonify({
             "error": "La solicitud a OpenAI no pudo completarse. Revisá el log de Render."
         }), 500
+
+
+@app.route("/draft-finding", methods=["POST"])
+def draft_finding():
+    data = request.get_json(silent=True) or {}
+    text = clean_text(data.get("text", ""))
+    category = clean_text(data.get("category", "Hallazgo"))
+    reason = clean_text(data.get("reason", ""))
+
+    if not text:
+        return jsonify({"error": "No hay texto para estructurar el hallazgo."}), 400
+
+    local_draft = smart_local_redaction(text, category, reason)
+    openai_client = get_openai_client()
+    if not openai_client:
+        return jsonify(local_draft)
+
+    instructions = """
+Actuá como Auditor Senior especialista en Auditoría Interna.
+Basándote ÚNICAMENTE en el hecho reportado del papel de trabajo, redactá una propuesta preliminar de hallazgo estructurada en JSON exacto con las siguientes claves:
+- title: Título corto y ejecutivo del hallazgo.
+- situation: Descripción objetiva de la Situación observada (nunca usar la palabra Condición).
+- risk: Riesgo potencial o impacto implícito.
+- proposal: Propuesta de mejora orientada al control interno y eficiencia.
+
+RESTRICCIÓN STRICTA: NO INVENTES importes, fechas, proveedores, nombres, cantidades, números de documento ni hechos no mencionados.
+Devolvé ÚNICAMENTE un JSON válido con las cuatro claves mencionadas.
+"""
+    prompt = f"CATEGORÍA: {category}\nMOTIVO: {reason}\nTEXTO DEL PAPEL DE TRABAJO:\n{text}"
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+        output_text = clean_text(response.choices[0].message.content)
+        json_match = re.search(r"\{.*\}", output_text, re.DOTALL)
+        if json_match:
+            import json
+            parsed = json.loads(json_match.group(0))
+            return jsonify({
+                "title": clean_text(parsed.get("title", local_draft["title"])),
+                "situation": clean_text(parsed.get("situation", local_draft["situation"])),
+                "risk": clean_text(parsed.get("risk", local_draft["risk"])),
+                "proposal": clean_text(parsed.get("proposal", local_draft["proposal"]))
+            })
+        return jsonify(local_draft)
+    except Exception as exc:
+        print(f"Error OpenAI /draft-finding: {type(exc).__name__}: {exc}", flush=True)
+        return jsonify(local_draft)
+
 
 
 NAVY = "17365D"
@@ -925,4 +1248,5 @@ def export_excel():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    app.run(host=host, port=port, debug=False)

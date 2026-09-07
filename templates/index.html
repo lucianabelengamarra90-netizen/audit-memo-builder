@@ -53,6 +53,13 @@
 
         </div>
 
+        <div style="padding: 0 16px 12px 16px;">
+            <button type="button" class="btn btn-secondary" style="width: 100%; text-align: center;" onclick="startNewAudit(true)">
+                + Nueva auditoría
+            </button>
+        </div>
+
+
 
         <nav class="steps">
 
@@ -574,22 +581,20 @@
                     </span>
 
                     <h2>
-                        Hallazgos identificados
+                        Potenciales hallazgos interpretados
                     </h2>
 
                     <p>
-                        Revisá las filas que mencionan expresamente
-                        hallazgo o hallazgos y seleccioná las que querés utilizar.
+                        La aplicación analiza e interpreta la información documentada en todas las solapas
+                        para identificar y consolidar potenciales hallazgos de auditoría.
                     </p>
 
                 </div>
 
 
-                <div
-                    class="count-badge"
-                    id="extractedCount"
-                >
-                    0 hallazgo(s)
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <button type="button" class="ai-button" onclick="draftAllExtractionsWithAI()">✦ Redactar todos con IA</button>
+                    <div class="count-badge" id="extractedCount">0 hallazgo(s)</div>
                 </div>
 
 
@@ -607,16 +612,14 @@
                 <div>
 
                     <strong>
-                        La herramienta no está auditando la base.
+                        Análisis e Interpretación de Papeles de Trabajo.
                     </strong>
 
                     <p>
-                        Recorre todas las solapas y filas, pero solo muestra
-                        contenido que incluya la palabra completa hallazgo
-                        o hallazgos. No infiere hallazgos por encabezados,
-                        columnas ni otras categorías. La incorporación al
-                        memo queda sujeta a tu validación.
+                        Recorre todas las solapas y filas, consolidando excepciones e inconsistencias detectadas.
+                        La decisión final de incorporar cada situación como hallazgo en el memo queda sujeta a tu validación como auditor.
                     </p>
+
 
                 </div>
 

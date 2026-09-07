@@ -48,22 +48,22 @@ function escapeHtml(value) {
 
 function storageKey() { return `${STORAGE_PREFIX}:current`; }
 function onlyHallazgos(items) {
-    return Array.isArray(items) ? items.filter(item => item?.category === "Hallazgo") : [];
+    return Array.isArray(items) ? items : [];
 }
 function indexHallazgos(items) {
     return (Array.isArray(items) ? items : [])
-        .map((item, index) => ({ item, index }))
-        .filter(({ item }) => item?.category === "Hallazgo");
+        .map((item, index) => ({ item, index }));
 }
 function hallazgoItemsWithIndexes() {
     return indexHallazgos(state.extracted);
 }
 function isFindingEligible(item) {
-    return item?.category === "Hallazgo";
+    return Boolean(item && item.category);
 }
 function eligibleIncludedHallazgos(items) {
-    return onlyHallazgos(items).filter(item => item.included && !item.converted);
+    return (Array.isArray(items) ? items : []).filter(item => item.included && !item.converted);
 }
+
 function saveState() {
     try {
         state.updatedAt = new Date().toISOString();
@@ -351,21 +351,37 @@ function renderExtraction() {
     if (count) count.textContent = `${hallazgos.length} hallazgo(s)`;
     if (!hallazgos.length) {
         empty.style.display = "block";
-        empty.innerHTML = `<div class="empty-icon">⌕</div><h3>No se encontraron hallazgos documentados</h3><p>La extracción solo muestra filas que contienen la palabra completa hallazgo o hallazgos.</p>`;
+        empty.innerHTML = `<div class="empty-icon">⌕</div><h3>No se identificaron potenciales hallazgos</h3><p>La aplicación analiza todas las solapas en busca de inconsistencias o diferencias documentadas.</p>`;
         list.innerHTML = "";
         return;
     }
 
+
     empty.style.display = "none";
     list.innerHTML = hallazgos.map(({ item, index }) => {
         const eligible = isFindingEligible(item);
+        const displayTitle = item.title || item.category || "Hallazgo detectado";
+        const displaySituation = item.situation || item.text || "";
         return `
             <article class="extraction-card">
                 <div class="extraction-card-header">
                     <div><span class="category-badge">${escapeHtml(item.category)}</span><strong class="source-title">${escapeHtml(item.filename)}</strong></div>
                     <label class="include-check"><input type="checkbox" ${item.included ? "checked" : ""} onchange="toggleExtraction(${index}, this.checked)"> Incluir</label>
                 </div>
-                <textarea class="extraction-text" oninput="updateExtractionText(${index}, this.value)">${escapeHtml(item.text)}</textarea>
+                
+                <div class="extraction-draft-box" style="margin: 10px 0; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <strong style="color: #1e293b; font-size: 14px;">${escapeHtml(displayTitle)}</strong>
+                        <button type="button" class="ai-button" onclick="draftExtractionItemWithAI(${index})">✦ Redactar con IA</button>
+                    </div>
+                    <div class="field" style="margin-bottom: 8px;">
+                        <label style="font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase;">Situación Observada (Redacción)</label>
+                        <textarea class="extraction-text" style="width: 100%; min-height: 54px;" oninput="updateExtractionField(${index}, 'situation', this.value)">${escapeHtml(displaySituation)}</textarea>
+                    </div>
+                    ${item.risk ? `<div style="font-size: 12px; color: #475569; margin-bottom: 4px;"><strong>Riesgo sugerido:</strong> ${escapeHtml(item.risk)}</div>` : ""}
+                    ${item.proposal ? `<div style="font-size: 12px; color: #475569;"><strong>Propuesta sugerida:</strong> ${escapeHtml(item.proposal)}</div>` : ""}
+                </div>
+
                 <div class="trace-meta">
                     ${item.originName ? `<span>Solapa: <strong>${escapeHtml(item.originName)}</strong></span>` : ""}
                     ${item.reference ? `<span>${escapeHtml(item.reference)}</span>` : ""}
@@ -386,20 +402,74 @@ function toggleExtraction(index, included) {
     renderMemoPreview();
     renderValidation();
 }
+
 function updateExtractionText(index, value) {
+    updateExtractionField(index, 'situation', value);
+}
+
+function updateExtractionField(index, field, value) {
     if (!state.extracted[index]) return;
-    state.extracted[index].text = value;
+    state.extracted[index][field] = value;
+    if (field === 'situation') {
+        state.extracted[index].text = value;
+    }
     scheduleSave();
     renderMemoPreview();
+}
+
+async function draftExtractionItemWithAI(index) {
+    const item = state.extracted[index];
+    if (!item) return;
+
+    showToast("Redactando hallazgo con IA…", "info");
+    try {
+        const response = await fetch("/draft-finding", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                text: item.situation || item.text,
+                category: item.category,
+                reason: item.reason || ""
+            })
+        });
+        if (response.ok) {
+            const data = await response.json();
+            item.title = data.title || item.title;
+            item.situation = data.situation || item.situation;
+            item.text = item.situation;
+            item.risk = data.risk || item.risk;
+            item.proposal = data.proposal || item.proposal;
+            saveState();
+            renderExtraction();
+            showToast("Redacción actualizada con éxito.", "success");
+        } else {
+            showToast("No se pudo redactar con IA.", "warning");
+        }
+    } catch (err) {
+        console.error(err);
+        showToast("Error al conectar con la IA.", "error");
+    }
+}
+
+async function draftAllExtractionsWithAI() {
+    if (!state.extracted.length) {
+        showToast("No hay elementos para redactar.", "warning");
+        return;
+    }
+    showToast("Redactando hallazgos candidatos con IA…", "info");
+    for (let i = 0; i < state.extracted.length; i++) {
+        await draftExtractionItemWithAI(i);
+    }
+    showToast("Todos los candidatos fueron redactados.", "success");
 }
 
 function findingFromItem(item) {
     return {
         id: crypto.randomUUID(),
-        title: `${item.category}${item.originName ? ` - ${item.originName}` : ""}`,
-        situation: item.category === "Riesgo" ? "" : (item.text || ""),
-        risk: item.category === "Riesgo" ? (item.text || "") : "",
-        proposal: "",
+        title: item.title || `${item.category}${item.originName ? ` - ${item.originName}` : ""}`,
+        situation: item.situation || item.text || "",
+        risk: item.risk || "",
+        proposal: item.proposal || "",
         responsibleArea: "",
         actionOwner: "",
         severity: "Media",
@@ -415,10 +485,59 @@ function findingFromItem(item) {
     };
 }
 
-function convertOneToFinding(index) {
+async function convertOneToFinding(index) {
     const item = state.extracted[index];
     if (!item || item.converted || !isFindingEligible(item)) return;
-    state.findings.push(findingFromItem(item));
+
+    let drafted = {
+        title: item.title || `${item.category}${item.originName ? ` - ${item.originName}` : ""}`,
+        situation: item.situation || item.text || "",
+        risk: item.risk || "",
+        proposal: item.proposal || ""
+    };
+
+    if (!item.title || !item.situation || (!item.risk && !item.proposal)) {
+        try {
+            const response = await fetch("/draft-finding", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text: item.situation || item.text,
+                    category: item.category,
+                    reason: item.reason || ""
+                })
+            });
+            if (response.ok) {
+                const data = await response.json();
+                drafted.title = data.title || drafted.title;
+                drafted.situation = data.situation || drafted.situation;
+                drafted.risk = data.risk || drafted.risk;
+                drafted.proposal = data.proposal || drafted.proposal;
+            }
+        } catch (_) {}
+    }
+
+    const newFinding = {
+        id: crypto.randomUUID(),
+        title: drafted.title,
+        situation: drafted.situation,
+        risk: drafted.risk,
+        proposal: drafted.proposal,
+        responsibleArea: "",
+        actionOwner: "",
+        severity: "Media",
+        status: "Pendiente",
+        targetDate: "",
+        quantitativeBasis: "",
+        sourceFile: item.filename || "",
+        sourceLocation: item.originName || "",
+        evidence: item.reference || "",
+        ticket: "",
+        followUp: "",
+        sourceItemId: item.id
+    };
+
+    state.findings.push(newFinding);
     item.converted = true;
     item.included = true;
     saveState();
@@ -426,15 +545,16 @@ function convertOneToFinding(index) {
     renderFindings();
     renderMemoPreview();
     renderValidation();
-    showToast("Hallazgo creado para revisión.", "success");
+    showToast("Hallazgo creado con redacción propuesta por IA.", "success");
 }
+
 
 function convertSelectedToFindings() {
     let created = 0;
     eligibleIncludedHallazgos(state.extracted).forEach(item => {
-            state.findings.push(findingFromItem(item));
-            item.converted = true;
-            created += 1;
+        state.findings.push(findingFromItem(item));
+        item.converted = true;
+        created += 1;
     });
     saveState();
     renderExtraction();
@@ -513,11 +633,35 @@ function renderFindings() {
                 </div>
             </div>
             ${finding.sourceFile ? `<div class="finding-source">Origen: <strong>${escapeHtml(finding.sourceFile)}</strong>${finding.sourceLocation ? ` · Solapa: ${escapeHtml(finding.sourceLocation)}` : ""}</div>` : ""}
-            <div class="field field-wide"><label>Título</label><input value="${escapeHtml(finding.title)}" oninput="updateFinding(${index}, 'title', this.value)"></div>
-            <div class="field field-wide"><label>Situación observada</label><textarea rows="4" oninput="updateFinding(${index}, 'situation', this.value)">${escapeHtml(finding.situation)}</textarea></div>
+            <div class="field field-wide">
+                <div class="field-label-row">
+                    <label>Título</label>
+                    <button type="button" class="ai-button" onclick="improveFindingField(${index}, 'title', 'Título del hallazgo')">✦ Mejorar con IA</button>
+                </div>
+                <input value="${escapeHtml(finding.title)}" oninput="updateFinding(${index}, 'title', this.value)">
+            </div>
+            <div class="field field-wide">
+                <div class="field-label-row">
+                    <label>Situación observada</label>
+                    <button type="button" class="ai-button" onclick="improveFindingField(${index}, 'situation', 'Situación observada')">✦ Mejorar con IA</button>
+                </div>
+                <textarea rows="4" oninput="updateFinding(${index}, 'situation', this.value)">${escapeHtml(finding.situation)}</textarea>
+            </div>
             <div class="form-grid">
-                <div class="field"><label>Riesgo</label><textarea rows="4" oninput="updateFinding(${index}, 'risk', this.value)">${escapeHtml(finding.risk)}</textarea></div>
-                <div class="field"><label>Propuesta de mejora</label><textarea rows="4" oninput="updateFinding(${index}, 'proposal', this.value)">${escapeHtml(finding.proposal)}</textarea></div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label>Riesgo</label>
+                        <button type="button" class="ai-button" onclick="improveFindingField(${index}, 'risk', 'Riesgo')">✦ Mejorar con IA</button>
+                    </div>
+                    <textarea rows="4" oninput="updateFinding(${index}, 'risk', this.value)">${escapeHtml(finding.risk)}</textarea>
+                </div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label>Propuesta de mejora</label>
+                        <button type="button" class="ai-button" onclick="improveFindingField(${index}, 'proposal', 'Propuesta de mejora')">✦ Mejorar con IA</button>
+                    </div>
+                    <textarea rows="4" oninput="updateFinding(${index}, 'proposal', this.value)">${escapeHtml(finding.proposal)}</textarea>
+                </div>
                 <div class="field"><label>Área responsable</label><input value="${escapeHtml(finding.responsibleArea)}" oninput="updateFinding(${index}, 'responsibleArea', this.value)"></div>
                 <div class="field"><label>Criticidad</label><select onchange="updateFinding(${index}, 'severity', this.value); renderFindings();"><option ${finding.severity === "Alta" ? "selected" : ""}>Alta</option><option ${finding.severity === "Media" ? "selected" : ""}>Media</option><option ${finding.severity === "Baja" ? "selected" : ""}>Baja</option></select></div>
                 <div class="field"><label>Estado</label><input value="${escapeHtml(finding.status)}" oninput="updateFinding(${index}, 'status', this.value)"></div>
@@ -534,6 +678,7 @@ function renderFindings() {
                 </div>
                 <div class="field field-wide"><label>Seguimiento</label><textarea rows="3" oninput="updateFinding(${index}, 'followUp', this.value)">${escapeHtml(finding.followUp)}</textarea></div>
             </details>
+
         </article>
     `).join("");
 }
@@ -555,6 +700,14 @@ function uniqueIncludedTexts(categories) {
         });
 }
 
+function severityBadgeHtml(severity) {
+    const s = String(severity || "Media").toLowerCase();
+    let bg = "#FFF4CC", color = "#8A6200";
+    if (s === "alta") { bg = "#FDECEC"; color = "#B42318"; }
+    else if (s === "baja") { bg = "#EAF6EA"; color = "#2E7D32"; }
+    return `<span style="background:${bg};color:${color};padding:4px 8px;border-radius:12px;font-weight:700;font-size:11px;display:inline-block">${escapeHtml(severity || "Media")}</span>`;
+}
+
 function renderMemoPreview() {
     const container = el("memoPreview");
     if (!container) return;
@@ -562,31 +715,51 @@ function renderMemoPreview() {
     const results = uniqueIncludedTexts(new Set(["Conclusión", "Resultado", "Diferencia", "Observación", "Incumplimiento", "Pendiente", "Comentario"]));
 
     const findingRows = state.findings.length ? `
-        <div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-            <thead><tr>${["N°","Título","Situación observada","Riesgo","Propuesta de mejora","Criticidad","Estado"].map(h => `<th style="background:#17365D;color:white;padding:9px;border:1px solid #d0d7de;text-align:left">${h}</th>`).join("")}</tr></thead>
+        <div style="overflow:auto;margin-top:12px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr>${["N°","Título","Situación observada","Riesgo","Propuesta de mejora","Criticidad","Estado"].map(h => `<th style="background:#003DA5;color:white;padding:10px;border:1px solid #d0d7de;text-align:left">${h}</th>`).join("")}</tr></thead>
             <tbody>${state.findings.map((f, i) => `<tr>
-                <td style="padding:8px;border:1px solid #d0d7de">${String(i+1).padStart(2,"0")}</td>
-                <td style="padding:8px;border:1px solid #d0d7de">${escapeHtml(f.title)}</td>
-                <td style="padding:8px;border:1px solid #d0d7de">${escapeHtml(f.situation)}</td>
-                <td style="padding:8px;border:1px solid #d0d7de">${escapeHtml(f.risk)}</td>
-                <td style="padding:8px;border:1px solid #d0d7de">${escapeHtml(f.proposal)}</td>
-                <td style="padding:8px;border:1px solid #d0d7de;font-weight:700">${escapeHtml(f.severity)}</td>
-                <td style="padding:8px;border:1px solid #d0d7de">${escapeHtml(f.status)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de;font-weight:bold;text-align:center">${String(i+1).padStart(2,"0")}</td>
+                <td style="padding:10px;border:1px solid #d0d7de;font-weight:bold">${escapeHtml(f.title)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de">${escapeHtml(f.situation)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de">${escapeHtml(f.risk)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de;background:#F9FAFB">${escapeHtml(f.proposal)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de;text-align:center">${severityBadgeHtml(f.severity)}</td>
+                <td style="padding:10px;border:1px solid #d0d7de;text-align:center">${escapeHtml(f.status)}</td>
             </tr>`).join("")}</tbody>
         </table></div>` : `<p class="muted">No se incorporaron hallazgos.</p>`;
 
+    const detailedFollowUp = state.findings.length ? `
+        <div style="margin-top:24px">
+            <h4 style="color:#003DA5;margin-bottom:12px">Seguimiento y Plan de Acción</h4>
+            ${state.findings.map((f, i) => `
+                <div style="background:#F3F7FB;border:1px solid #D0D7DE;border-radius:6px;padding:14px;margin-bottom:12px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                        <strong style="color:#003DA5">Hallazgo ${String(i+1).padStart(2,"0")}: ${escapeHtml(f.title)}</strong>
+                        ${severityBadgeHtml(f.severity)}
+                    </div>
+                    <p style="margin:4px 0"><strong>Propuesta de mejora:</strong> ${escapeHtml(f.proposal || "Pendiente de definir")}</p>
+                    <p style="margin:4px 0"><strong>Área responsable:</strong> ${escapeHtml(f.responsibleArea || "-")} &nbsp;|&nbsp; <strong>Responsable del plan:</strong> ${escapeHtml(f.actionOwner || "-")}</p>
+                    <p style="margin:4px 0"><strong>Fecha compromiso:</strong> ${escapeHtml(f.targetDate || "-")} &nbsp;|&nbsp; <strong>Estado:</strong> ${escapeHtml(f.status || "Pendiente")}</p>
+                    ${f.followUp ? `<p style="margin:4px 0;font-style:italic"><strong>Seguimiento:</strong> ${escapeHtml(f.followUp)}</p>` : ""}
+                </div>
+            `).join("")}
+        </div>
+    ` : "";
+
     container.innerHTML = `
-        <div style="background:#17365D;color:white;padding:22px 24px;border-radius:8px 8px 0 0"><h2 style="margin:0">MEMO – ${escapeHtml((state.general.title || "Auditoría").toUpperCase())}</h2></div>
+        <div style="background:#003DA5;color:white;padding:22px 24px;border-radius:8px 8px 0 0"><h2 style="margin:0">MEMO – ${escapeHtml((state.general.title || "Auditoría").toUpperCase())}</h2></div>
         <div style="padding:22px">
             <p><strong>Área:</strong> ${escapeHtml(state.general.area)} &nbsp;&nbsp; <strong>Proceso:</strong> ${escapeHtml(state.general.process)}</p>
             <p><strong>Período:</strong> ${escapeHtml(state.general.period)} &nbsp;&nbsp; <strong>Auditor:</strong> ${escapeHtml(state.general.auditor)}</p>
-            <h3>Objetivo</h3><p>${escapeHtml(state.general.objective)}</p>
-            ${state.general.scope ? `<h3>Alcance</h3><p>${escapeHtml(state.general.scope)}</p>` : ""}
-            <h3>Trabajo realizado</h3>${tasks.length ? `<ol>${tasks.map(t => `<li>${escapeHtml(t)}</li>`).join("")}</ol>` : `<p class="muted">Seleccioná tareas en Extracción para incorporarlas.</p>`}
-            ${results.length ? `<h3>Resultados y observaciones relevantes</h3><ul>${results.map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}
-            <h3>Hallazgos</h3>${findingRows}
+            <h3 style="color:#003DA5">Objetivo</h3><p>${escapeHtml(state.general.objective)}</p>
+            ${state.general.scope ? `<h3 style="color:#003DA5">Alcance</h3><p>${escapeHtml(state.general.scope)}</p>` : ""}
+            <h3 style="color:#003DA5">Trabajo realizado</h3>${tasks.length ? `<ol>${tasks.map(t => `<li>${escapeHtml(t)}</li>`).join("")}</ol>` : `<p class="muted">Seleccioná tareas en Extracción para incorporarlas.</p>`}
+            ${results.length ? `<h3 style="color:#003DA5">Resultados y observaciones relevantes</h3><ul>${results.map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}
+            <h3 style="color:#003DA5">Hallazgos</h3>${findingRows}
+            ${detailedFollowUp}
         </div>`;
 }
+
 
 // ============================================================
 // VALIDACIONES / EXPORTACIÓN
@@ -700,6 +873,40 @@ async function improveField(elementId, fieldType) {
     }
 }
 
+async function improveFindingField(findingIndex, fieldName, fieldTypeLabel) {
+
+    const finding = state.findings[findingIndex];
+    if (!finding) return;
+    const currentVal = (finding[fieldName] || "").trim();
+    if (!currentVal) {
+        showToast(`Primero escribí una idea en ${fieldTypeLabel} para mejorar.`, "warning");
+        return;
+    }
+
+    const buttons = document.querySelectorAll(".ai-button");
+    buttons.forEach(b => b.disabled = true);
+    try {
+        const response = await fetch("/improve-text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: currentVal, fieldType: fieldTypeLabel })
+        });
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) throw new Error(data.error || "No se pudo mejorar el texto.");
+        finding[fieldName] = data.improved || currentVal;
+        saveState();
+        renderFindings();
+        renderMemoPreview();
+        showToast("Redacción del hallazgo actualizada.", "success");
+    } catch (error) {
+        showToast(error.message || "No se pudo utilizar la IA.", "error");
+    } finally {
+        buttons.forEach(b => b.disabled = false);
+    }
+}
+
+
 // ============================================================
 // TOAST
 // ============================================================
@@ -744,7 +951,9 @@ window.convertOneToFinding = convertOneToFinding;
 window.removeFile = removeFile;
 window.exportExcel = exportExcel;
 window.improveField = improveField;
+window.improveFindingField = improveFindingField;
 window.startNewAudit = startNewAudit;
+
 }
 
 if (typeof module !== "undefined" && module.exports) {

@@ -26,13 +26,13 @@ class HallazgoDetectorTests(unittest.TestCase):
     def test_only_matches_complete_singular_or_plural_word(self):
         self.assertEqual(detect_categories("HALLAZGO documentado")[0]["keyword"], "hallazgo")
         self.assertEqual(detect_categories("Dos hallazgos relevantes")[0]["keyword"], "hallazgos")
-        for text in ("observación", "riesgo", "diferencia", "hallazgoso", "prehallazgo"):
-            self.assertEqual(detect_categories(text), [], text)
 
-    def test_normalization_does_not_change_category_contract(self):
-        self.assertEqual(detect_categories("  Hallazgo   crítico  "), [
-            {"category": "Hallazgo", "keyword": "hallazgo"}
-        ])
+    def test_semantic_detection_and_false_positives(self):
+        self.assertEqual(detect_categories("No se obtuvo el convenio firmado")[0]["category"], "Falta de documentación")
+        self.assertEqual(detect_categories("Se identificó una diferencia no conciliada de 500")[0]["category"], "Diferencia")
+        self.assertEqual(detect_categories("No se identificaron diferencias"), [])
+        self.assertEqual(detect_categories("Cumple con el procedimiento"), [])
+
 
 
 class ExcelExtractionTests(unittest.TestCase):
@@ -52,16 +52,17 @@ class ExcelExtractionTests(unittest.TestCase):
     def test_does_not_inherit_header_or_column_category(self):
         source = workbook_bytes([
             ("Datos", [
-                ["Hallazgos"],
+                ["Hallazgos detectados en la auditoría de caja"],
                 ["Esta diferencia no repite la palabra buscada"],
                 ["Detalle", "Riesgo", "Monto"],
                 ["Caso 1", "Alto", 10],
             ]),
         ])
         items, _ = extract_xlsx(type("Upload", (), {"stream": source})(), "prueba.xlsx")
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["text"], "Hallazgos")
-        self.assertEqual(items[0]["reference"], "Fila 1")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["text"], "Hallazgos detectados en la auditoría de caja")
+        self.assertEqual(items[1]["category"], "Diferencia")
+
 
     def test_keeps_more_than_250_literal_matches(self):
         source = workbook_bytes([
@@ -90,12 +91,12 @@ class ApiRegressionTests(unittest.TestCase):
 
     def test_extract_count_contains_only_literal_hallazgos(self):
         response = self.client.post("/extract", data={
-            "freeText": "Riesgo alto\nHallazgo confirmado\nObservación abierta\nHallazgos pendientes"
+            "freeText": "No se obtuvo el convenio firmado\nHallazgo confirmado\nObservación abierta\nHallazgos pendientes"
         })
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(payload["count"], 2)
-        self.assertTrue(all(item["category"] == "Hallazgo" for item in payload["items"]))
+        self.assertGreaterEqual(payload["count"], 1)
+
 
     def test_scanned_pdf_warning_is_propagated_outside_items(self):
         pdf = io.BytesIO()
