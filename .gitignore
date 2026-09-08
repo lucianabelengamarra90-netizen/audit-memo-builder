@@ -11,3 +11,5 @@ uploads/*
 *.log
 .env
 .DS_Store
+*.db
+*.sqlite

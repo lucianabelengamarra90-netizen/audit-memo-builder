@@ -188,6 +188,14 @@
 
             </button>
 
+            <button
+                class="btn btn-secondary"
+                style="margin-top: 16px; width: 100%; font-size: 13px; gap: 6px;"
+                onclick="toggleKnowledgeModal()"
+            >
+                🧠 Memoria de Auditoría
+            </button>
+
 
         </nav>
 
@@ -210,7 +218,7 @@
 
 
     <!-- =====================================================
-         CONTENIDO
+         CONTENIDO PRINCIPAL
     ====================================================== -->
 
     <main class="main-content">
@@ -231,16 +239,15 @@
                 <div>
 
                     <span class="eyebrow">
-                        NUEVO MEMO
+                        INFORMACIÓN GENERAL
                     </span>
 
                     <h2>
-                        Información del trabajo
+                        Datos y evidencia
                     </h2>
 
                     <p>
-                        Completá los datos generales y cargá los
-                        papeles de trabajo utilizados en la auditoría.
+                        Definí los datos básicos del memo y cargá los archivos que querés analizar.
                     </p>
 
                 </div>
@@ -455,10 +462,7 @@
                         </h3>
 
                         <p>
-                            Cargá documentación ya trabajada.
-                            La herramienta extraerá información
-                            existente sin generar conclusiones
-                            automáticas de auditoría.
+                            Seleccioná o arrastrá los archivos que querés analizar.
                         </p>
 
                     </div>
@@ -466,34 +470,28 @@
                 </div>
 
 
-                <label
-                    class="drop-zone"
+                <div
                     id="dropZone"
-                    for="fileInput"
+                    class="drop-zone"
+                    onclick="document.getElementById('fileInput').click()"
                 >
 
-
-                    <div class="upload-icon">
+                    <div class="drop-icon">
                         ↑
                     </div>
 
+                    <p>
+                        <strong>
+                            Hacé clic para seleccionar
+                        </strong>
+                        o arrastrá tus archivos acá
+                    </p>
 
-                    <strong>
-                        Arrastrá tus papeles de trabajo
-                    </strong>
-
-
-                    <span>
-                        o hacé clic para seleccionar archivos
+                    <span class="file-types">
+                        Soporta .xlsx, .csv, .docx, .pdf y .txt
                     </span>
 
-
-                    <small>
-                        Excel · Word · PDF · CSV · TXT
-                    </small>
-
-
-                </label>
+                </div>
 
 
                 <input
@@ -660,7 +658,7 @@
                     class="btn btn-secondary"
                     onclick="goToStep(1)"
                 >
-                    ← Volver
+                    ← Volver a Información
                 </button>
 
 
@@ -668,7 +666,10 @@
                     class="btn btn-primary"
                     onclick="convertSelectedToFindings()"
                 >
-                    Continuar con seleccionados →
+                    Continuar a Hallazgos
+                    <span>
+                        →
+                    </span>
                 </button>
 
 
@@ -694,16 +695,15 @@
                 <div>
 
                     <span class="eyebrow">
-                        HALLAZGOS
+                        HALLAZGOS DE AUDITORÍA
                     </span>
 
                     <h2>
-                        Estructura del memo
+                        Estructura uniforme del memo
                     </h2>
 
                     <p>
-                        Todos los hallazgos mantienen el mismo
-                        esquema para asegurar uniformidad.
+                        Definí el contenido final de cada observación antes de generar la vista previa.
                     </p>
 
                 </div>
@@ -726,23 +726,22 @@
             >
 
                 <div class="empty-icon">
-                    !
+                    ✍
                 </div>
 
                 <h3>
-                    No hay hallazgos todavía
+                    No hay hallazgos cargados
                 </h3>
 
                 <p>
-                    Podés convertir información extraída o
-                    agregar un hallazgo manualmente.
+                    Podés convertir los elementos identificados desde el paso anterior o crear uno nuevo.
                 </p>
 
             </div>
 
 
             <div
-                id="findingsList"
+                id="findingsContainer"
                 class="findings-list"
             ></div>
 
@@ -754,7 +753,7 @@
                     class="btn btn-secondary"
                     onclick="goToStep(2)"
                 >
-                    ← Volver
+                    ← Volver a Extracción
                 </button>
 
 
@@ -762,7 +761,11 @@
                     class="btn btn-primary"
                     onclick="goToStep(4)"
                 >
-                    Ver memo →
+                    Ver vista previa del Memo
+                    <span>
+                        →
+                    </span>
+
                 </button>
 
 
@@ -787,16 +790,28 @@
                 <div>
 
                     <span class="eyebrow">
-                        MEMO
+                        VISTA PREVIA
                     </span>
 
                     <h2>
-                        Vista previa
+                        Memo de Auditoría Interna
                     </h2>
 
                     <p>
-                        Revisá la estructura antes de finalizar.
+                        Esta vista refleja la estructura final que se exportará a Excel.
                     </p>
+
+                </div>
+
+
+                <div class="preview-actions">
+
+                    <button
+                        class="btn btn-primary"
+                        onclick="exportExcel()"
+                    >
+                        Exportar Memo (Excel)
+                    </button>
 
                 </div>
 
@@ -805,7 +820,7 @@
 
             <div
                 id="memoPreview"
-                class="memo-paper"
+                class="memo-document"
             ></div>
 
 
@@ -816,7 +831,7 @@
                     class="btn btn-secondary"
                     onclick="goToStep(3)"
                 >
-                    ← Editar hallazgos
+                    ← Volver a Hallazgos
                 </button>
 
 
@@ -824,7 +839,11 @@
                     class="btn btn-primary"
                     onclick="goToStep(5)"
                 >
-                    Finalizar →
+                    Ir a Finalizar
+                    <span>
+                        →
+                    </span>
+
                 </button>
 
 
@@ -849,15 +868,15 @@
                 <div>
 
                     <span class="eyebrow">
-                        FINALIZAR
+                        CONTROL Y EXPORTACIÓN
                     </span>
 
                     <h2>
-                        Control del memo
+                        Validaciones finales
                     </h2>
 
                     <p>
-                        Verificá la integridad antes de emitirlo.
+                        Verificá la consistencia antes de cerrar el trabajo.
                     </p>
 
                 </div>
@@ -865,83 +884,78 @@
             </div>
 
 
-            <div class="final-grid">
+            <div class="card">
 
 
-                <div class="card">
+                <div class="card-header">
 
+                    <div>
 
-                    <div class="card-header">
+                        <h3>
+                            Estado del documento
+                        </h3>
 
-                        <div>
-
-                            <h3>
-                                Estado del documento
-                            </h3>
-
-                            <p>
-                                Validaciones de uniformidad.
-                            </p>
-
-                        </div>
+                        <p>
+                            Resumen de consistencia de la información ingresada.
+                        </p>
 
                     </div>
-
-
-                    <div
-                        id="validationList"
-                        class="validation-list"
-                    ></div>
-
 
                 </div>
 
 
-                <div class="card export-card">
+                <div
+                    id="validationList"
+                    class="validation-list"
+                ></div>
 
 
-                    <div class="export-icon">
-                        ↓
+            </div>
+
+
+            <div class="card">
+
+
+                <div class="card-header">
+
+                    <div>
+
+                        <h3>
+                            Exportar
+                        </h3>
+
+                        <p>
+                            Generá el papel de trabajo final en formato ejecutable Excel (.xlsx).
+                        </p>
+
                     </div>
 
-
-                    <h3>
-                        Exportar memo
-                    </h3>
+                </div>
 
 
-                    <p>
-                        Generá el archivo con el memo,
-                        hallazgos, fuentes y trazabilidad.
-                    </p>
+                <div class="export-box">
+
+                    <div>
+
+                        <strong>
+                            Memo estructurado
+                        </strong>
+
+                        <p>
+                            Incluye Encabezado, Resumen Ejecutivo, Detalle de Hallazgos, Fuentes y Trazabilidad.
+                        </p>
+
+                    </div>
 
 
                     <button
-                        class="btn btn-primary btn-large"
+                        class="btn btn-primary"
                         onclick="exportExcel()"
                     >
-                        Exportar Excel
+                        Descargar archivo Excel
                     </button>
 
-
                 </div>
-
-
-            </div>
-
-
-            <div class="page-actions">
-
-
-                <button
-                    class="btn btn-secondary"
-                    onclick="goToStep(4)"
-                >
-                    ← Volver al memo
-                </button>
-
-
-                <div></div>
 
 
             </div>
@@ -953,6 +967,37 @@
     </main>
 
 
+</div>
+
+
+<div id="knowledgeModal" style="display:none; position: fixed; inset: 0; background: rgba(15,23,42,0.6); z-index: 9999; align-items: center; justify-content: center; padding: 20px;">
+    <div style="background: white; border-radius: 12px; max-width: 800px; width: 100%; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);">
+        <div style="padding: 16px 24px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
+            <h3 style="margin: 0; font-size: 18px; color: #1e293b;">🧠 Memoria de Auditoría & Base de Conocimiento</h3>
+            <button type="button" class="icon-button" style="font-size: 20px; cursor: pointer;" onclick="toggleKnowledgeModal()">×</button>
+        </div>
+        <div style="padding: 20px; overflow-y: auto; flex: 1;">
+            <p style="font-size: 13px; color: #64748b; margin-top: 0;">Esta base guarda las redacciones de hallazgos aprobadas en auditorías anteriores. La IA y el motor semántico usan esta información para redactar futuros hallazgos en el mismo estilo de tu firma.</p>
+            <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                <input type="text" id="knowledgeSearch" placeholder="Buscar en la memoria de auditoría..." style="flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px;" oninput="filterKnowledgeItems(this.value)">
+                <button type="button" class="btn btn-primary" onclick="toggleAddRuleForm()">+ Agregar Regla</button>
+            </div>
+            <div id="addRuleForm" style="display: none; background: #f8fafc; padding: 14px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 16px;">
+                <h4 style="margin-top: 0; margin-bottom: 8px; font-size: 14px;">Agregar nueva redacción de preferencia</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px;">
+                    <input type="text" id="newRuleCategory" placeholder="Categoría (ej: Incumplimiento)" style="padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                    <input type="text" id="newRuleTitle" placeholder="Título formal preferido" style="padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                </div>
+                <textarea id="newRuleSituation" placeholder="Situación observada modelo" rows="2" style="width: 100%; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; margin-bottom: 8px;"></textarea>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                    <input type="text" id="newRuleRisk" placeholder="Riesgo modelo" style="padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                    <input type="text" id="newRuleProposal" placeholder="Propuesta modelo" style="padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                </div>
+                <button type="button" class="btn btn-primary" onclick="saveCustomRule()">Guardar en Memoria</button>
+            </div>
+            <div id="knowledgeList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        </div>
+    </div>
 </div>
 
 

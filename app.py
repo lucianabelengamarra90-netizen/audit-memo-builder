@@ -23,6 +23,16 @@ import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 
+from knowledge import (
+    init_knowledge_db,
+    save_learned_findings,
+    get_relevant_knowledge,
+    get_all_knowledge,
+    add_custom_knowledge_item,
+    delete_knowledge_item
+)
+
+init_knowledge_db()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
@@ -115,6 +125,17 @@ def smart_local_redaction(text, category="Hallazgo", reason=""):
     parts = [p.strip() for p in clean_t.split("|") if p.strip()]
     non_header_parts = [p for p in parts if not is_header_row(p) and normalize_text(p) not in GENERIC_HEADER_TERMS]
     narrative = " | ".join(non_header_parts) if non_header_parts else clean_t
+
+    # Buscar en la base de conocimiento aprendida
+    relevant = get_relevant_knowledge(narrative, category, limit=1)
+    if relevant:
+        past = relevant[0]
+        return {
+            "title": past.get("title", f"{category} detectado"),
+            "situation": f"{past.get('title')}: {narrative}",
+            "risk": past.get("risk") or "Riesgo de inconsistencia operativa, descalce de información o debilidad de control interno.",
+            "proposal": past.get("proposal") or "Revisar la situación relevada, regularizar la registración y respaldar documentalmente la operación."
+        }
 
     title = f"{category} detectado"
     situation = narrative
@@ -892,14 +913,21 @@ def draft_finding():
     if not openai_client:
         return jsonify(local_draft)
 
-    instructions = """
+    past_examples = get_relevant_knowledge(text, category, limit=2)
+    example_text = ""
+    if past_examples:
+        example_text = "\n\nEJEMPLOS DE HALLAZGOS APROBADOS POR TU EQUIPO EN AUDITORÍAS ANTERIORES:\n"
+        for ex in past_examples:
+            example_text += f"- Título: {ex.get('title')}\n  Situación: {ex.get('situation')}\n  Riesgo: {ex.get('risk')}\n  Propuesta: {ex.get('proposal')}\n\n"
+
+    instructions = f"""
 Actuá como Auditor Senior especialista en Auditoría Interna.
 Basándote ÚNICAMENTE en el hecho reportado del papel de trabajo, redactá una propuesta preliminar de hallazgo estructurada en JSON exacto con las siguientes claves:
 - title: Título corto y ejecutivo del hallazgo.
 - situation: Descripción objetiva de la Situación observada (nunca usar la palabra Condición).
 - risk: Riesgo potencial o impacto implícito.
 - proposal: Propuesta de mejora orientada al control interno y eficiencia.
-
+{example_text}
 RESTRICCIÓN STRICTA: NO INVENTES importes, fechas, proveedores, nombres, cantidades, números de documento ni hechos no mencionados.
 Devolvé ÚNICAMENTE un JSON válido con las cuatro claves mencionadas.
 """
@@ -1230,6 +1258,11 @@ def export_excel():
     ] for item in extracted]
     build_detail_sheet(ws_trace, trace_headers, trace_rows, [18, 65, 34, 28, 15, 20, 10, 11])
 
+    try:
+        save_learned_findings(findings, clean_text(general.get("title", "Auditoría")))
+    except Exception as exc:
+        print(f"Error guardando aprendizaje continuo en exportación: {exc}", flush=True)
+
     output = BytesIO()
     workbook.save(output)
     output.seek(0)
@@ -1244,6 +1277,43 @@ def export_excel():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.route("/knowledge", methods=["GET", "POST"])
+def manage_knowledge():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        category = clean_text(data.get("category", "Hallazgo"))
+        title = clean_text(data.get("title", ""))
+        situation = clean_text(data.get("situation", ""))
+        risk = clean_text(data.get("risk", ""))
+        proposal = clean_text(data.get("proposal", ""))
+        
+        if not title or not situation:
+            return jsonify({"error": "El título y la situación observada son obligatorios."}), 400
+            
+        item_id = add_custom_knowledge_item(category, title, situation, risk, proposal, "Regla de Firma")
+        return jsonify({"message": "Regla de conocimiento agregada.", "id": item_id})
+
+    items = get_all_knowledge()
+    return jsonify({"items": items, "count": len(items)})
+
+
+@app.route("/knowledge/<item_id>", methods=["DELETE"])
+def remove_knowledge(item_id):
+    success = delete_knowledge_item(item_id)
+    if success:
+        return jsonify({"message": "Elemento de conocimiento eliminado."})
+    return jsonify({"error": "No se encontró el elemento."}), 404
+
+
+@app.route("/learn-findings", methods=["POST"])
+def learn_findings():
+    data = request.get_json(silent=True) or {}
+    findings = data.get("findings", [])
+    audit_title = clean_text(data.get("auditTitle", "Auditoría"))
+    saved_count = save_learned_findings(findings, audit_title)
+    return jsonify({"message": f"Se guardaron {saved_count} hallazgos en la memoria de la firma.", "saved": saved_count})
 
 
 if __name__ == "__main__":

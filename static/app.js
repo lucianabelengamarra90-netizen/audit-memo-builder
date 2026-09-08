@@ -937,6 +937,127 @@ if (typeof document !== "undefined") document.addEventListener("DOMContentLoaded
     goToStep(state.currentStep || 1);
 });
 
+// ============================================================
+// BASE DE CONOCIMIENTO Y MEMORIA DE AUDITORÍA
+// ============================================================
+
+let allKnowledgeItems = [];
+
+async function toggleKnowledgeModal() {
+    const modal = el("knowledgeModal");
+    if (!modal) return;
+    const isHidden = modal.style.display === "none" || !modal.style.display;
+    modal.style.display = isHidden ? "flex" : "none";
+    if (isHidden) {
+        await loadKnowledgeItems();
+    }
+}
+
+async function loadKnowledgeItems() {
+    try {
+        const response = await fetch("/knowledge");
+        if (!response.ok) return;
+        const data = await response.json();
+        allKnowledgeItems = data.items || [];
+        renderKnowledgeList(allKnowledgeItems);
+    } catch (err) {
+        console.error("Error cargando memoria de auditoría:", err);
+    }
+}
+
+function renderKnowledgeList(items) {
+    const list = el("knowledgeList");
+    if (!list) return;
+    if (!items.length) {
+        list.innerHTML = `<div style="text-align: center; color: #64748b; padding: 20px;">No se encontraron elementos en la memoria.</div>`;
+        return;
+    }
+    list.innerHTML = items.map(item => `
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+                <div>
+                    <span class="category-badge" style="background: #e2e8f0; color: #334155;">${escapeHtml(item.category)}</span>
+                    <strong style="color: #0f172a; font-size: 14px; margin-left: 6px;">${escapeHtml(item.title)}</strong>
+                </div>
+                <button type="button" class="icon-button" onclick="deleteKnowledgeItem('${item.id}')" title="Eliminar regla">×</button>
+            </div>
+            <div style="font-size: 13px; color: #334155; margin-bottom: 4px;"><strong>Situación:</strong> ${escapeHtml(item.situation)}</div>
+            ${item.risk ? `<div style="font-size: 12px; color: #64748b; margin-bottom: 2px;"><strong>Riesgo:</strong> ${escapeHtml(item.risk)}</div>` : ""}
+            ${item.proposal ? `<div style="font-size: 12px; color: #64748b;"><strong>Propuesta:</strong> ${escapeHtml(item.proposal)}</div>` : ""}
+            <div style="font-size: 11px; color: #94a3b8; margin-top: 6px;">Origen: ${escapeHtml(item.source_audit || 'Auditoría')}</div>
+        </div>
+    `).join("");
+}
+
+function filterKnowledgeItems(query) {
+    const q = (query || "").toLowerCase().trim();
+    if (!q) {
+        renderKnowledgeList(allKnowledgeItems);
+        return;
+    }
+    const filtered = allKnowledgeItems.filter(item =>
+        (item.title || "").toLowerCase().includes(q) ||
+        (item.situation || "").toLowerCase().includes(q) ||
+        (item.category || "").toLowerCase().includes(q)
+    );
+    renderKnowledgeList(filtered);
+}
+
+function toggleAddRuleForm() {
+    const form = el("addRuleForm");
+    if (!form) return;
+    form.style.display = form.style.display === "none" ? "block" : "none";
+}
+
+async function saveCustomRule() {
+    const category = (el("newRuleCategory")?.value || "").trim();
+    const title = (el("newRuleTitle")?.value || "").trim();
+    const situation = (el("newRuleSituation")?.value || "").trim();
+    const risk = (el("newRuleRisk")?.value || "").trim();
+    const proposal = (el("newRuleProposal")?.value || "").trim();
+
+    if (!title || !situation) {
+        showToast("Completá al menos el Título y la Situación observada.", "warning");
+        return;
+    }
+
+    try {
+        const response = await fetch("/knowledge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ category: category || "Regla de Firma", title, situation, risk, proposal })
+        });
+        if (response.ok) {
+            showToast("Regla guardada en la memoria.", "success");
+            if (el("newRuleCategory")) el("newRuleCategory").value = "";
+            if (el("newRuleTitle")) el("newRuleTitle").value = "";
+            if (el("newRuleSituation")) el("newRuleSituation").value = "";
+            if (el("newRuleRisk")) el("newRuleRisk").value = "";
+            if (el("newRuleProposal")) el("newRuleProposal").value = "";
+            toggleAddRuleForm();
+            await loadKnowledgeItems();
+        } else {
+            showToast("No se pudo guardar la regla.", "error");
+        }
+    } catch (err) {
+        console.error(err);
+        showToast("Error al guardar regla.", "error");
+    }
+}
+
+async function deleteKnowledgeItem(itemId) {
+    if (!confirm("¿Eliminar este elemento de la memoria de auditoría?")) return;
+    try {
+        const response = await fetch(`/knowledge/${itemId}`, { method: "DELETE" });
+        if (response.ok) {
+            showToast("Elemento eliminado de la memoria.", "success");
+            await loadKnowledgeItems();
+        }
+    } catch (err) {
+        console.error(err);
+    }
+}
+
 if (typeof window !== "undefined") {
 window.goToStep = goToStep;
 window.extractInformation = extractInformation;
@@ -953,6 +1074,11 @@ window.exportExcel = exportExcel;
 window.improveField = improveField;
 window.improveFindingField = improveFindingField;
 window.startNewAudit = startNewAudit;
+window.toggleKnowledgeModal = toggleKnowledgeModal;
+window.filterKnowledgeItems = filterKnowledgeItems;
+window.toggleAddRuleForm = toggleAddRuleForm;
+window.saveCustomRule = saveCustomRule;
+window.deleteKnowledgeItem = deleteKnowledgeItem;
 
 }
 
