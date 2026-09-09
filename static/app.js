@@ -322,28 +322,60 @@ async function extractInformation() {
     }
 
     goToStep(2);
-    renderExtractionStatus("Analizando todas las solapas del papel de trabajo…", "loading");
+    renderExtractionStatus("Iniciando análisis…", "loading");
     if (el("extractionList")) el("extractionList").innerHTML = "";
     if (el("extractedCount")) el("extractedCount").textContent = "Procesando…";
+
+    const previousExtracted = [...state.extracted];
+    state.extracted = [];
 
     const form = new FormData();
     selectedFiles.forEach(file => form.append("files", file));
     form.append("freeText", freeText);
 
+    let renderPending = false;
+    function scheduleRender() {
+        if (renderPending) return;
+        renderPending = true;
+        requestAnimationFrame(() => {
+            renderPending = false;
+            renderExtraction();
+            if (el("extractedCount")) {
+                el("extractedCount").textContent = `${state.extracted.length} hallazgo(s)`;
+            }
+        });
+    }
+
     try {
         const response = await fetch("/extract", { method: "POST", body: form });
-        let data = {};
-        try { data = await response.json(); } catch (_) {}
-        if (!response.ok) throw new Error(data.error || "No se pudo procesar la documentación.");
 
-        const incoming = onlyHallazgos(data.items).map(item => ({
-            ...item,
-            included: Boolean(item.included),
-            selectedAsFinding: Boolean(item.selectedAsFinding),
-            converted: Boolean(item.converted)
-        }));
-        // Reconciliar con extracción anterior para preservar IDs vinculados a hallazgos
-        state.extracted = reconcileExtracted(incoming, state.extracted);
+        if (!response.ok) {
+            let data = {};
+            try { data = await response.json(); } catch (_) {}
+            throw new Error(data.error || "No se pudo procesar la documentación.");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let warnings = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                try {
+                    const event = JSON.parse(line.slice(6));
+                    handleSSEEvent(event, previousExtracted, scheduleRender, () => { warnings = event.warnings || []; });
+                } catch (parseErr) {}
+            }
+        }
         if (selectedFiles.length) {
             state.sources = selectedFiles.map(file => ({
                 name: file.name,
@@ -355,9 +387,7 @@ async function extractInformation() {
         saveState();
         renderExtraction();
         renderValidation();
-
-        const warningText = (data.warnings || []).length ? ` · ${(data.warnings || []).length} advertencia(s)` : "";
-        showToast(`${data.message || "Extracción finalizada"}${warningText}`, (data.errors || []).length ? "warning" : "success");
+        if (el("extractedCount")) el("extractedCount").textContent = `${state.extracted.length} hallazgo(s)`;
     } catch (error) {
         console.error(error);
         renderExtractionStatus("La extracción no pudo completarse.");
@@ -368,6 +398,41 @@ async function extractInformation() {
             button.disabled = false;
             if (button.dataset.originalText) button.innerHTML = button.dataset.originalText;
         }
+    }
+}
+
+function handleSSEEvent(event, previousExtracted, scheduleRender, setWarnings) {
+    if (event.type === "status") {
+        renderExtractionStatus(event.message, "loading");
+    } else if (event.type === "item") {
+        const item = {
+            ...event.item,
+            included: Boolean(event.item.included),
+            selectedAsFinding: Boolean(event.item.selectedAsFinding),
+            converted: Boolean(event.item.converted)
+        };
+        const key = `${item.filename || ""}|${item.originName || ""}|${item.reference || ""}`;
+        const prev = previousExtracted.find(p =>
+            `${p.filename || ""}|${p.originName || ""}|${p.reference || ""}` === key
+        );
+        if (prev) {
+            item.id = prev.id;
+            item.included = prev.included;
+            item.selectedAsFinding = prev.selectedAsFinding || false;
+            item.converted = prev.converted;
+        }
+        state.extracted.push(item);
+        scheduleRender();
+    } else if (event.type === "error") {
+        showToast(event.error, "warning");
+    } else if (event.type === "done") {
+        setWarnings();
+        const warningText = (event.warnings || []).length ? ` · ${(event.warnings || []).length} advertencia(s)` : "";
+        const hasErrors = (event.errors || []).length > 0;
+        showToast(
+            `${event.message || "Extracción finalizada"}${warningText}`,
+            hasErrors ? "warning" : "success"
+        );
     }
 }
 

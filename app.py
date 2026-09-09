@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -15,6 +15,7 @@ from functools import lru_cache
 from math import ceil
 
 import csv
+import json
 import os
 import re
 import sqlite3
@@ -710,7 +711,6 @@ Devolvé ÚNICAMENTE un JSON con la estructura {"findings": [...]}.
 
             json_match = re.search(r"\{.*\}", output_text, re.DOTALL)
             if json_match:
-                import json
                 parsed = json.loads(json_match.group(0))
                 ai_findings = parsed.get("findings", [])
                 if ai_findings:
@@ -799,49 +799,112 @@ def extract_information():
     if not files and not free_text:
         return jsonify({"error": "Cargá al menos un papel de trabajo o ingresá texto adicional."}), 400
 
-    extracted_items, errors, warnings = [], [], []
+    # Leer los archivos ANTES de iniciar el generador (el request context no está disponible durante el stream)
+    file_payloads = []
     for uploaded_file in files:
-        filename = uploaded_file.filename or "archivo_sin_nombre"
-        extension = get_extension(filename)
-        if extension not in ALLOWED_EXTENSIONS:
-            errors.append(f"{filename}: formato no admitido.")
-            continue
-        print(f"Iniciando extracción: {filename}", flush=True)
-        try:
-            if extension == "xlsx":
-                excel_items, excel_warnings = extract_xlsx(uploaded_file, filename)
-                extracted_items.extend(excel_items)
-                warnings.extend(excel_warnings)
-            elif extension == "csv":
-                extracted_items.extend(extract_csv(uploaded_file, filename))
-            elif extension == "docx":
-                extracted_items.extend(extract_docx(uploaded_file, filename))
-            elif extension == "pdf":
-                pdf_items, pdf_warnings = extract_pdf(uploaded_file, filename)
-                extracted_items.extend(pdf_items)
-                warnings.extend(pdf_warnings)
-            elif extension == "txt":
-                extracted_items.extend(extract_txt(uploaded_file, filename))
-        except Exception as exc:
-            print(f"Error procesando {filename}: {type(exc).__name__}: {exc}", flush=True)
-            errors.append(f"{filename}: {type(exc).__name__}: {exc}")
-        print(f"Extracción finalizada: {filename}", flush=True)
+        fname = uploaded_file.filename or "archivo_sin_nombre"
+        ext = get_extension(fname)
+        if ext not in ALLOWED_EXTENSIONS:
+            file_payloads.append((fname, ext, None))
+        else:
+            file_payloads.append((fname, ext, uploaded_file.read()))
 
-    if free_text:
-        extracted_items.extend(extract_free_text(free_text))
+    def generate():
+        all_local_items = []
+        warnings_all = []
+        errors_all = []
 
-    consolidated_items = analyze_and_consolidate_findings_with_ai(extracted_items)
+        def sse(data):
+            return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-    return jsonify({
-        "items": consolidated_items,
-        "count": len(consolidated_items),
-        "errors": errors,
-        "warnings": warnings,
-        "message": (
-            f"Se identificaron {len(consolidated_items)} potenciales hallazgos analizados e interpretados. "
-            "Revisalos antes de incorporarlos al memo."
-        )
-    })
+        # Wrapper para que los extractores reciban el mismo tipo de objeto
+        class BytesFile:
+            def __init__(self, b):
+                self.stream = BytesIO(b)
+                self._data = b
+            def read(self):
+                return self._data
+
+        # Fase 1: extracción local (rápida, regex)
+        for fname, ext, data in file_payloads:
+            if data is None:
+                msg = f"{fname}: formato no admitido."
+                errors_all.append(msg)
+                yield sse({"type": "error", "error": msg})
+                continue
+
+            yield sse({"type": "status", "message": f"Analizando {fname}…"})
+            print(f"Iniciando extracción: {fname}", flush=True)
+            try:
+                fake = BytesFile(data)
+                if ext == "xlsx":
+                    items, w = extract_xlsx(fake, fname)
+                    warnings_all.extend(w)
+                elif ext == "csv":
+                    items = extract_csv(fake, fname)
+                elif ext == "docx":
+                    items = extract_docx(fake, fname)
+                elif ext == "pdf":
+                    items, w = extract_pdf(fake, fname)
+                    warnings_all.extend(w)
+                elif ext == "txt":
+                    items = extract_txt(fake, fname)
+                else:
+                    items = []
+                all_local_items.extend(items)
+                yield sse({"type": "status", "message": f"{fname}: {len(items)} elemento(s) detectado(s)."})
+                print(f"Extracción finalizada: {fname}", flush=True)
+            except Exception as exc:
+                msg = f"{fname}: {type(exc).__name__}: {exc}"
+                errors_all.append(msg)
+                print(msg, flush=True)
+                yield sse({"type": "error", "error": msg})
+
+        if free_text:
+            ft_items = extract_free_text(free_text)
+            all_local_items.extend(ft_items)
+
+        # Fase 2: consolidación con IA (puede ser lenta, pero el usuario ya ve el progreso)
+        if all_local_items:
+            yield sse({"type": "status", "message": "Consolidando y redactando hallazgos con IA…"})
+            try:
+                consolidated = analyze_and_consolidate_findings_with_ai(all_local_items)
+            except Exception as exc:
+                consolidated = all_local_items
+                errors_all.append(f"Error en consolidación IA: {exc}")
+
+            # Enviar cada hallazgo uno por uno para que aparezcan progresivamente
+            for item in consolidated:
+                yield sse({"type": "item", "item": item})
+
+            yield sse({
+                "type": "done",
+                "count": len(consolidated),
+                "warnings": warnings_all,
+                "errors": errors_all,
+                "message": (
+                    f"Se identificaron {len(consolidated)} potenciales hallazgos analizados e interpretados. "
+                    "Revisálos antes de incorporarlos al memo."
+                )
+            })
+        else:
+            yield sse({
+                "type": "done",
+                "count": 0,
+                "warnings": warnings_all,
+                "errors": errors_all,
+                "message": "No se identificaron potenciales hallazgos."
+            })
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
 
 
 
