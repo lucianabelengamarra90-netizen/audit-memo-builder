@@ -63,6 +63,37 @@ function isFindingEligible(item) {
 function eligibleIncludedHallazgos(items) {
     return (Array.isArray(items) ? items : []).filter(item => item.included && !item.converted);
 }
+// Solo los marcados EXPLÍCITAMENTE como hallazgo por el auditor
+function eligibleSelectedFindings(items) {
+    return (Array.isArray(items) ? items : []).filter(item => item.selectedAsFinding && !item.converted);
+}
+// Busca el candidato original de un hallazgo por sourceItemId
+function getSourceItemForFinding(finding) {
+    return (typeof state !== "undefined" ? state.extracted : []).find(item => item.id === finding.sourceItemId) || null;
+}
+// Reconcilia una nueva extracción con los candidatos anteriores para preservar IDs
+function reconcileExtracted(incoming, previous) {
+    const prevMap = new Map();
+    (previous || []).forEach(item => {
+        const key = `${item.filename || ""}|${item.originName || ""}|${item.reference || ""}`;
+        if (!prevMap.has(key)) prevMap.set(key, item);
+    });
+    return incoming.map(item => {
+        const key = `${item.filename || ""}|${item.originName || ""}|${item.reference || ""}`;
+        const prev = prevMap.get(key);
+        if (prev) {
+            // Reutilizar el id anterior para no romper sourceItemId en hallazgos ya creados
+            return {
+                ...item,
+                id: prev.id,
+                included: prev.included,
+                selectedAsFinding: prev.selectedAsFinding || false,
+                converted: prev.converted,
+            };
+        }
+        return { ...item, selectedAsFinding: Boolean(item.selectedAsFinding) };
+    });
+}
 
 function saveState() {
     try {
@@ -305,11 +336,14 @@ async function extractInformation() {
         try { data = await response.json(); } catch (_) {}
         if (!response.ok) throw new Error(data.error || "No se pudo procesar la documentación.");
 
-        state.extracted = onlyHallazgos(data.items).map(item => ({
+        const incoming = onlyHallazgos(data.items).map(item => ({
             ...item,
             included: Boolean(item.included),
+            selectedAsFinding: Boolean(item.selectedAsFinding),
             converted: Boolean(item.converted)
         }));
+        // Reconciliar con extracción anterior para preservar IDs vinculados a hallazgos
+        state.extracted = reconcileExtracted(incoming, state.extracted);
         if (selectedFiles.length) {
             state.sources = selectedFiles.map(file => ({
                 name: file.name,
@@ -362,11 +396,21 @@ function renderExtraction() {
         const eligible = isFindingEligible(item);
         const displayTitle = item.title || item.category || "Hallazgo detectado";
         const displaySituation = item.situation || item.text || "";
+        const statusText = item.converted
+            ? "✓ Convertido en hallazgo"
+            : item.selectedAsFinding
+                ? "★ Marcado como hallazgo (pendiente de convertir)"
+                : eligible
+                    ? "Puede convertirse en hallazgo"
+                    : "Se incorporará como soporte del memo";
         return `
             <article class="extraction-card">
                 <div class="extraction-card-header">
                     <div><span class="category-badge">${escapeHtml(item.category)}</span><strong class="source-title">${escapeHtml(item.filename)}</strong></div>
-                    <label class="include-check"><input type="checkbox" ${item.included ? "checked" : ""} onchange="toggleExtraction(${index}, this.checked)"> Incluir</label>
+                    <div style="display:flex;gap:12px;align-items:center;">
+                        <label class="include-check"><input type="checkbox" ${item.included ? "checked" : ""} onchange="toggleExtraction(${index}, this.checked)"> Incluir</label>
+                        ${eligible ? `<label class="include-check" style="font-weight:600;color:#1e40af;"><input type="checkbox" ${item.selectedAsFinding ? "checked" : ""} onchange="toggleSelectedAsFinding('${item.id}', this.checked)"> Hallazgo</label>` : ""}
+                    </div>
                 </div>
                 
                 <div class="extraction-draft-box" style="margin: 10px 0; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
@@ -388,8 +432,8 @@ function renderExtraction() {
                     ${item.keyword ? `<span>Detectado por: ${escapeHtml(item.keyword)}</span>` : ""}
                 </div>
                 <div class="extraction-card-footer">
-                    <span>${item.converted ? "Convertido en hallazgo" : eligible ? "Puede convertirse en hallazgo" : "Se incorporará como soporte del memo"}</span>
-                    ${eligible && !item.converted ? `<button type="button" class="btn btn-secondary" onclick="convertOneToFinding(${index})">Crear hallazgo</button>` : ""}
+                    <span>${statusText}</span>
+                    ${eligible && !item.converted ? `<button type="button" class="btn btn-secondary" onclick="convertOneToFinding('${item.id}')">Crear hallazgo</button>` : ""}
                 </div>
             </article>`;
     }).join("");
@@ -400,6 +444,16 @@ function toggleExtraction(index, included) {
     state.extracted[index].included = included;
     scheduleSave();
     renderMemoPreview();
+    renderValidation();
+}
+
+// Marca/desmarca un candidato como hallazgo. Busca por ID, nunca por índice.
+function toggleSelectedAsFinding(itemId, value) {
+    const item = state.extracted.find(i => i.id === itemId);
+    if (!item) return;
+    item.selectedAsFinding = value;
+    scheduleSave();
+    renderExtraction();
     renderValidation();
 }
 
@@ -466,6 +520,10 @@ async function draftAllExtractionsWithAI() {
 function findingFromItem(item) {
     return {
         id: crypto.randomUUID(),
+        // Trazabilidad: relación directa con el candidato de origen
+        sourceItemId: item.id,
+        sourceItemIds: (item.sourceItemIds && item.sourceItemIds.length) ? item.sourceItemIds : [item.id],
+        // Copia exacta de lo que el auditor aprobó — sin reinterpretación
         title: item.title || `${item.category}${item.originName ? ` - ${item.originName}` : ""}`,
         situation: item.situation || item.text || "",
         risk: item.risk || "",
@@ -480,78 +538,32 @@ function findingFromItem(item) {
         sourceLocation: item.originName || "",
         evidence: item.reference || "",
         ticket: "",
-        followUp: "",
-        sourceItemId: item.id
+        followUp: ""
     };
 }
 
-async function convertOneToFinding(index) {
-    const item = state.extracted[index];
+// Convierte un candidato en hallazgo usando exactamente los datos que el auditor aprobó.
+// Busca por ID (nunca por índice). No llama a IA automáticamente.
+function convertOneToFinding(itemId) {
+    const item = state.extracted.find(i => i.id === itemId);
     if (!item || item.converted || !isFindingEligible(item)) return;
 
-    let drafted = {
-        title: item.title || `${item.category}${item.originName ? ` - ${item.originName}` : ""}`,
-        situation: item.situation || item.text || "",
-        risk: item.risk || "",
-        proposal: item.proposal || ""
-    };
-
-    if (!item.title || !item.situation || (!item.risk && !item.proposal)) {
-        try {
-            const response = await fetch("/draft-finding", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    text: item.situation || item.text,
-                    category: item.category,
-                    reason: item.reason || ""
-                })
-            });
-            if (response.ok) {
-                const data = await response.json();
-                drafted.title = data.title || drafted.title;
-                drafted.situation = data.situation || drafted.situation;
-                drafted.risk = data.risk || drafted.risk;
-                drafted.proposal = data.proposal || drafted.proposal;
-            }
-        } catch (_) {}
-    }
-
-    const newFinding = {
-        id: crypto.randomUUID(),
-        title: drafted.title,
-        situation: drafted.situation,
-        risk: drafted.risk,
-        proposal: drafted.proposal,
-        responsibleArea: "",
-        actionOwner: "",
-        severity: "Media",
-        status: "Pendiente",
-        targetDate: "",
-        quantitativeBasis: "",
-        sourceFile: item.filename || "",
-        sourceLocation: item.originName || "",
-        evidence: item.reference || "",
-        ticket: "",
-        followUp: "",
-        sourceItemId: item.id
-    };
-
-    state.findings.push(newFinding);
+    state.findings.push(findingFromItem(item));
     item.converted = true;
-    item.included = true;
+    item.selectedAsFinding = true;
     saveState();
     renderExtraction();
     renderFindings();
     renderMemoPreview();
     renderValidation();
-    showToast("Hallazgo creado con redacción propuesta por IA.", "success");
+    showToast("Hallazgo creado a partir del candidato seleccionado.", "success");
 }
 
 
+// Convierte en hallazgos solo los candidatos marcados con selectedAsFinding por el auditor.
 function convertSelectedToFindings() {
     let created = 0;
-    eligibleIncludedHallazgos(state.extracted).forEach(item => {
+    eligibleSelectedFindings(state.extracted).forEach(item => {
         state.findings.push(findingFromItem(item));
         item.converted = true;
         created += 1;
@@ -561,7 +573,7 @@ function convertSelectedToFindings() {
     renderFindings();
     renderMemoPreview();
     goToStep(3);
-    showToast(created ? `${created} hallazgo(s) creados para revisión.` : "Los elementos seleccionados quedaron incorporados al memo.", "success");
+    showToast(created ? `${created} hallazgo(s) creados.` : "No había candidatos marcados como hallazgo.", "success");
 }
 
 // ============================================================
@@ -593,7 +605,11 @@ function deleteFinding(index) {
     if (!window.confirm(`¿Eliminar el Hallazgo ${String(index + 1).padStart(2, "0")}?`)) return;
     if (finding.sourceItemId) {
         const source = state.extracted.find(item => item.id === finding.sourceItemId);
-        if (source) source.converted = false;
+        if (source) {
+            // Habilitar el candidato para ser convertido nuevamente
+            source.converted = false;
+            // selectedAsFinding se preserva en true: el auditor ya lo eligió como hallazgo
+        }
     }
     state.findings.splice(index, 1);
     saveState();
@@ -1067,6 +1083,7 @@ window.updateFinding = updateFinding;
 window.deleteFinding = deleteFinding;
 window.moveFinding = moveFinding;
 window.toggleExtraction = toggleExtraction;
+window.toggleSelectedAsFinding = toggleSelectedAsFinding;
 window.updateExtractionText = updateExtractionText;
 window.convertOneToFinding = convertOneToFinding;
 window.removeFile = removeFile;
@@ -1079,6 +1096,7 @@ window.filterKnowledgeItems = filterKnowledgeItems;
 window.toggleAddRuleForm = toggleAddRuleForm;
 window.saveCustomRule = saveCustomRule;
 window.deleteKnowledgeItem = deleteKnowledgeItem;
+window.draftAllExtractionsWithAI = draftAllExtractionsWithAI;
 
 }
 
@@ -1087,6 +1105,10 @@ if (typeof module !== "undefined" && module.exports) {
         onlyHallazgos,
         indexHallazgos,
         isFindingEligible,
-        eligibleIncludedHallazgos
+        eligibleIncludedHallazgos,
+        eligibleSelectedFindings,
+        findingFromItem,
+        getSourceItemForFinding,
+        reconcileExtracted,
     };
 }
