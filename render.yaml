@@ -4,7 +4,7 @@ services:
     env: python
     region: sa-east-1
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --worker-class gevent --workers 2 --timeout 300 --keep-alive 5
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
