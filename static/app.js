@@ -480,15 +480,27 @@ function renderExtraction() {
                 
                 <div class="extraction-draft-box" style="margin: 10px 0; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <strong style="color: #1e293b; font-size: 14px;">${escapeHtml(displayTitle)}</strong>
+                        <input
+                            value="${escapeHtml(displayTitle)}"
+                            oninput="updateExtractionField(${index}, 'title', this.value)"
+                            style="width: 100%; font-weight: 600; margin-right: 12px;"
+                        >
                         <button type="button" class="ai-button" onclick="draftExtractionItemWithAI(${index})">✦ Redactar con IA</button>
                     </div>
                     <div class="field" style="margin-bottom: 8px;">
                         <label style="font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase;">Situación Observada (Redacción)</label>
                         <textarea class="extraction-text" style="width: 100%; min-height: 54px;" oninput="updateExtractionField(${index}, 'situation', this.value)">${escapeHtml(displaySituation)}</textarea>
                     </div>
-                    ${item.risk ? `<div style="font-size: 12px; color: #475569; margin-bottom: 4px;"><strong>Riesgo sugerido:</strong> ${escapeHtml(item.risk)}</div>` : ""}
-                    ${item.proposal ? `<div style="font-size: 12px; color: #475569;"><strong>Propuesta sugerida:</strong> ${escapeHtml(item.proposal)}</div>` : ""}
+                    <div class="form-grid">
+                        <div class="field">
+                            <label>Riesgo</label>
+                            <textarea rows="3" oninput="updateExtractionField(${index}, 'risk', this.value)">${escapeHtml(item.risk || "")}</textarea>
+                        </div>
+                        <div class="field">
+                            <label>Propuesta de mejora</label>
+                            <textarea rows="3" oninput="updateExtractionField(${index}, 'proposal', this.value)">${escapeHtml(item.proposal || "")}</textarea>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="trace-meta">
